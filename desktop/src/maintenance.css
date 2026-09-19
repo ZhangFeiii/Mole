@@ -40,6 +40,9 @@
   min-width: 0;
   flex: 1;
 }
+.maintenance-item > div > small {
+  display: block;
+}
 .maintenance-item strong {
   font-size: 14px;
   overflow-wrap: anywhere;

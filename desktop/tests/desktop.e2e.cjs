@@ -200,6 +200,17 @@ test("maintenance pages preview real capabilities and cancelling never executes"
       await expect(page.locator('input[type="checkbox"]:checked')).toHaveCount(
         0,
       );
+      if (kind === "applications") {
+        const row = page.locator(".maintenance-item").first();
+        const publisher = row.locator("div > small").first();
+        if (await publisher.count()) {
+          const nameBox = await row.locator("strong").boundingBox();
+          const publisherBox = await publisher.boundingBox();
+          expect(publisherBox.y).toBeGreaterThanOrEqual(
+            nameBox.y + nameBox.height - 1,
+          );
+        }
+      }
       const plan = await page.evaluate(
         (kind) => window.mole.maintenancePreview(kind),
         kind,
