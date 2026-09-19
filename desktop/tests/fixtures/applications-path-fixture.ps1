@@ -20,6 +20,8 @@ foreach ($name in @(
     "Test-LocalDrivePath",
     "Get-LocalPathParts",
     "Get-TrustedPathBoundary",
+    "Test-TrustedDirectoryPath",
+    "Get-TrustedExecutableItem",
     "Resolve-TrustedExecutablePath",
     "Resolve-TrustedDirectoryPath"
 )) {

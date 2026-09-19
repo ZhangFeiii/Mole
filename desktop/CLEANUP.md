@@ -1,6 +1,6 @@
 # Windows 清理与手选文件回收：评审版
 
-只读 `v0.1.0-readonly` 和写入预览 `v0.2.0-windows-core` 保持归档不变。本目录的新实现用于独立评审分支，尚须整合主进程与 Windows 原生 CI 验证。
+只读 `v0.1.0-readonly` 和写入预览 `v0.2.0-windows-core` 保持归档不变。本目录的新实现已整合进 `codex/windows-review`，以该分支对应提交的 Windows 原生 CI 结果为验收依据。
 
 ## 模块与职责
 
@@ -91,7 +91,7 @@ const plan = await analysisTrash.preview(selectedEntryIds, {
 
 ## 原生只读命令
 
-- `desktop-agent inspect`：stdin `{paths:[...]}`，2 MiB/2,048 路径上限。返回每条 `attributes/inUse/error/code`。Windows 每次查询目标前逐段预检父目录，遇 reparse/offline/recall/非目录立即停止，绝不继续探测后代；对普通文件使用只读属性、no-share、OPEN_NO_RECALL/OPEN_REPARSE_POINT 句柄探测占用，不读文件内容。失败不假装空闲；UNC/设备/网络盘不允许。Node 侧也先通过此原生检查，再执行 lstat/opendir，避免先跨不可信父链。
+- `desktop-agent inspect`：stdin `{paths:[...]}`，2 MiB/2,048 路径上限。返回每条 `attributes/inUse/error/code`。Windows 每次查询目标前逐段预检父目录，遇 reparse/offline/recall/非目录立即停止，绝不继续探测后代；普通文件以 `GENERIC_READ`、no-share、OPEN_NO_RECALL/OPEN_REPARSE_POINT 打开后立即关闭句柄，不调用 ReadFile、不读取内容。单纯请求属性不参与数据共享冲突，不能用来证明文件空闲。失败不假装空闲；UNC/设备/网络盘不允许。Node 侧也先通过此原生检查，再执行 lstat/opendir，避免先跨不可信父链。
 - `desktop-agent activity`：`{platform,ok,names,warnings}`。Windows Toolhelp32 只读完整进程名快照，失败禁用有关 owner cache；不运行 PowerShell。程序仍可能在快照后启动，所以执行前重查并同时检查每个文件是否占用。
 - `desktop-agent status-stream`：固定 2 秒节拍，同一进程串行 Collect，单轮 context 8 秒，JSON 一行一帧，输出失败/中断即退出。不接受 renderer 间隔参数，不写磁盘；原 `status` 仍是单次读取。
 - `desktop-agent platform-info`：无输入，`{platform,schema:1,systemDirectory}`。Windows 直接使用 `GetSystemDirectory`，不读 SystemRoot/Path 环境变量；非 Windows 的目录为空。主进程用它建立可信 PowerShell 路径。

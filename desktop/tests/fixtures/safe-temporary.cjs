@@ -31,7 +31,12 @@ async function safe_remove_temporary(directory) {
     (await fs.realpath(directory)) !== directory
   )
     throw new Error("Fixture directory identity changed");
-  await fs.rm(directory, { recursive: true, force: false });
+  await fs.rm(directory, {
+    recursive: true,
+    force: false,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
   owned.delete(directory);
 }
 module.exports = { make_temporary, safe_remove_temporary };

@@ -4,7 +4,8 @@ const {
 } = require("./fixtures/safe-temporary.cjs");
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 const fsp = require("node:fs/promises");
 const http = require("node:http");
 const net = require("node:net");
@@ -18,6 +19,38 @@ const packagedExecutable = process.env.MOLE_PACKAGED_EXE
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function stopOwnedChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  assert.ok(Number.isSafeInteger(child.pid) && child.pid > 0);
+  const closed = new Promise((resolve) => {
+    const timer = setTimeout(
+      () => resolve(new Error("Owned packaged process did not close")),
+      15000,
+    );
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+  });
+  // Terminate only the process tree returned by this test's own spawn. Killing
+  // just Electron's parent can leave Chromium holding the temporary profile.
+  try {
+    await promisify(execFile)(
+      path.join(process.env.SystemRoot, "System32", "taskkill.exe"),
+      ["/PID", String(child.pid), "/T", "/F"],
+      { windowsHide: true, shell: false, timeout: 10000 },
+    );
+  } catch (error) {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      const closeError = await closed;
+      throw closeError || error;
+    }
+  }
+  const error = await closed;
+  if (error) throw error;
 }
 
 async function waitForRunning(child, milliseconds) {
@@ -163,8 +196,7 @@ test(
           "the real packaged executable did not stay running",
         );
       } finally {
-        if (child.exitCode === null) child.kill();
-        await wait(500);
+        await stopOwnedChild(child);
       }
     } finally {
       await safe_remove_temporary(appRoot);
@@ -199,9 +231,15 @@ test(
       await cdpReady(port);
       browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
       const context = browser.contexts()[0];
-      const page = context.pages()[0];
-      assert.ok(page, "packaged app did not create a renderer page");
+      assert.ok(context, "packaged app did not create a browser context");
+      const page =
+        context.pages()[0] ||
+        (await context.waitForEvent("page", { timeout: 20000 }));
+      await page.waitForURL(/^file:.*\/dist\/index\.html$/, { timeout: 20000 });
       await page.waitForLoadState("domcontentloaded");
+      await page
+        .getByRole("navigation", { name: "主导航" })
+        .waitFor({ state: "visible" });
       const pages = [
         ["垃圾清理", "扫描可清理缓存", "cleanup"],
         ["软件管理", "扫描已安装软件", "applications"],
@@ -230,15 +268,19 @@ test(
             `${navigation} unexpectedly selected a maintenance item`,
           );
         }
+        await page.mouse.move(1, 1);
         await page.screenshot({
           path: path.join(screenshotRoot, `${filename}.png`),
           fullPage: true,
+          animations: "disabled",
         });
       }
     } finally {
-      await browser?.close().catch(() => {});
-      if (child.exitCode === null) child.kill();
-      await wait(500);
+      try {
+        await stopOwnedChild(child);
+      } finally {
+        await browser?.close().catch(() => {});
+      }
       await safe_remove_temporary(userData);
     }
   },

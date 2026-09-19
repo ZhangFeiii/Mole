@@ -6,7 +6,7 @@ on:
     paths: ["desktop/**", "internal/desktop/**", "cmd/desktop-agent/**", "go.mod", "go.sum", ".github/workflows/desktop.yml"]
   pull_request:
     branches: [windows]
-    paths: ["desktop/**", "internal/desktop/**", "cmd/desktop-agent/**", ".github/workflows/desktop.yml"]
+    paths: ["desktop/**", "internal/desktop/**", "cmd/desktop-agent/**", "go.mod", "go.sum", ".github/workflows/desktop.yml"]
   workflow_dispatch:
 
 permissions:
@@ -35,9 +35,14 @@ jobs:
         run: go test -race ./internal/desktop ./cmd/desktop-agent
       - name: Test existing Windows Go tools
         run: go test ./cmd/analyze ./cmd/status
+      - name: Check reachable desktop Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./internal/desktop ./cmd/desktop-agent
       - name: Install pinned desktop dependencies
         working-directory: desktop
         run: npm ci
+      - name: Audit desktop dependency advisories
+        working-directory: desktop
+        run: npm audit --audit-level=high
       - name: Build native collector and renderer
         working-directory: desktop
         run: npm run build

@@ -14,7 +14,6 @@ import {
   remainingPlanSeconds,
   type ItemFilter,
 } from "./maintenanceModel";
-import "./maintenance.css";
 
 type ReviewKind = "cleanup" | "applications" | "optimize";
 const content = {

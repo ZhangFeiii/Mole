@@ -542,6 +542,8 @@ test("PowerShell file is a Windows-only read/query/execute boundary", () => {
   assert.match(source, /ProductCode/);
   assert.match(source, /Get-TrustedPathBoundary/);
   assert.match(source, /DriveType/);
+  assert.match(source, /ExpectedIdentity/);
+  assert.match(source, /启动前卸载程序文件指纹/);
   assert.match(source, /break/);
   assert.match(source, /Status\s*,?\s*"unknown"|"unknown"/);
   assert.doesNotMatch(source, /Invoke-Expression/);
@@ -644,10 +646,67 @@ test(
 );
 
 test(
+  "Windows Win32 uninstall rechecks the executable fingerprint immediately before launch",
+  {
+    skip:
+      process.platform !== "win32" || process.env.MOLE_NATIVE_WINDOWS !== "1",
+  },
+  async () => {
+    const systemRoot = process.env.SystemRoot || "C:\\Windows";
+    const executable = path.join(
+      systemRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    const fixturePath = path.join(
+      __dirname,
+      "fixtures/applications-final-check-fixture.ps1",
+    );
+    const sourcePath = path.join(__dirname, "../windows/applications.ps1");
+    const child = spawn(
+      executable,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        fixturePath,
+        "-SourcePath",
+        sourcePath,
+      ],
+      { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    const code = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        child.kill();
+        reject(new Error("Windows final executable fixture timed out"));
+      }, 30000);
+      child.once("error", reject);
+      child.once("close", (exitCode) => {
+        clearTimeout(timeout);
+        resolve(exitCode);
+      });
+    });
+    assert.equal(code, 0, Buffer.concat(stderr).toString("utf8"));
+    const lines = Buffer.concat(stdout).toString("utf8").trim().split(/\r?\n/);
+    assert.deepEqual(JSON.parse(lines[0]), { ok: true });
+  },
+);
+
+test(
   "Windows fixture rejects mismatched or extra-target MSI commands without uninstalling",
   { skip: !nativeCI, timeout: 120000 },
   async () => {
     const runPowerShell = createPowerShellRunner({
+      systemRoot: process.env.SystemRoot,
       scriptsDirectory: path.resolve(__dirname, "../windows"),
     });
     const service = createApplicationsService({ runPowerShell });
@@ -692,6 +751,7 @@ test(
         { ok: true },
       );
       const runPowerShell = createPowerShellRunner({
+        systemRoot: process.env.SystemRoot,
         scriptsDirectory: path.resolve(__dirname, "../windows"),
       });
       const service = createApplicationsService({ runPowerShell });

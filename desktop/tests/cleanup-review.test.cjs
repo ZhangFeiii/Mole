@@ -3,14 +3,44 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
+const { protectedFile } = require("../electron/cleanup-safety.cjs");
 const { createCleanupService } = require("../electron/cleanup.cjs");
 const {
   createSafeTrashEngine,
   fingerprint,
 } = require("../electron/safe-trash.cjs");
 async function fixture(extra = {}) {
+  // Windows os.tmpdir() is normally inside AppData, which is deliberately
+  // forbidden for analysis-page recovery. Model a user home outside that
+  // boundary instead of weakening production protection for test paths.
+  const fixtureParent =
+    process.platform === "win32"
+      ? process.env.RUNNER_TEMP ||
+        path.join(os.homedir(), ".mole-test-fixtures")
+      : os.tmpdir();
+  assert.ok(
+    path.isAbsolute(fixtureParent) && !/^(\\\\|\/\/)/.test(fixtureParent),
+    "Fixture parent must be an absolute local directory",
+  );
+  await fs.mkdir(fixtureParent, { recursive: true });
+  const canonicalParent = await fs.realpath(fixtureParent);
+  assert.equal(
+    protectedFile(
+      { path: canonicalParent },
+      path.join(
+        canonicalParent,
+        "mole-cache-review-probe",
+        "Documents",
+        "fixture.pdf",
+      ),
+      [],
+      { explicit: true },
+    ),
+    null,
+    "Positive analysis fixtures must be outside production-protected directories",
+  );
   const home = await fs.realpath(
-      await fs.mkdtemp(path.join(os.tmpdir(), "mole-cache-review-")),
+      await fs.mkdtemp(path.join(canonicalParent, "mole-cache-review-")),
     ),
     time = { value: Date.now() + 10 * 86400000 },
     active = { names: [], ok: true },
@@ -336,6 +366,7 @@ test("analysis-file recovery remains confined to explicit snapshot IDs and moves
     ],
   });
   const plan = await engine.preview(["selected"]);
+  assert.equal(plan.items[0].enabled, true, plan.items[0].reason);
   const result = await engine.execute(plan.id, [plan.items[0].id]);
   assert.equal(result.results[0].status, "success");
   assert.deepEqual(f.moved, [p]);
@@ -364,7 +395,7 @@ test("analysis engine accepts only server snapshot IDs, detects replacements and
   });
   await assert.rejects(engine.preview([p]), /快照/);
   let plan = await engine.preview(["entry-1"]);
-  assert.equal(plan.items[0].enabled, true);
+  assert.equal(plan.items[0].enabled, true, plan.items[0].reason);
   assert.equal(plan.items[0].recommended, false);
   await fs.writeFile(p, "replacement");
   const result = await engine.execute(plan.id, [plan.items[0].id]);
@@ -392,6 +423,7 @@ test("analysis and cache actions share custom protection and reject unknown in-u
     ],
   });
   let plan = await engine.preview(["id"]);
+  assert.equal(plan.items[0].enabled, true, plan.items[0].reason);
   await engine.protect(plan.id, plan.items[0].id);
   assert.equal((await f.service.listProtected())[0].path, p);
   plan = await engine.preview(["id"]);
@@ -401,6 +433,30 @@ test("analysis and cache actions share custom protection and reject unknown in-u
   plan = await engine.preview(["id"]);
   assert.equal(plan.items[0].enabled, false);
   assert.match(plan.items[0].reason, /占用/);
+});
+
+test("analysis still rejects AppData files even inside an authorized fixture home", async () => {
+  const f = await fixture();
+  const target = await f.write("AppData/Local/Temp/forbidden.tmp");
+  const stat = await fs.lstat(target, { bigint: true });
+  const engine = createSafeTrashEngine({
+    ...f.options,
+    authorizeSelection: async () => [
+      {
+        id: "appdata-file",
+        path: target,
+        root: f.home,
+        identity: fingerprint(stat),
+        size: Number(stat.size),
+      },
+    ],
+  });
+  const plan = await engine.preview(["appdata-file"]);
+  assert.equal(plan.items[0].enabled, false);
+  assert.match(plan.items[0].reason, /系统、应用资料或敏感目录/);
+  await assert.rejects(engine.execute(plan.id, [plan.items[0].id]), /已授权/);
+  assert.equal(await fs.readFile(target, "utf8"), "fixture-only");
+  assert.equal(f.moved.length, 0);
 });
 
 test("completed protection receipt survives blocked housekeeping and can be retired safely", async () => {

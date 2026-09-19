@@ -19,6 +19,7 @@ $script:Warnings = New-Object 'System.Collections.Generic.List[string]'
 $script:RunningProcessNames = @{}
 $script:RunningProcessSnapshotReady = $false
 $script:RunningProcessSnapshotError = $false
+$script:FingerprintCache = @{}
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $script:Utf8NoBom
 $inputEncoding = $script:Utf8NoBom
@@ -166,7 +167,10 @@ function Test-DangerousUninstallCommand {
 }
 
 function Resolve-TrustedExecutablePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NoCache
+    )
 
     # Only an absolute local drive path is accepted.  UNC, device namespace,
     # drive-relative, rooted-current-drive, and reparse/cloud paths are all
@@ -174,7 +178,18 @@ function Resolve-TrustedExecutablePath {
     # ancestors from the drive root before it ever opens the final child; this
     # prevents a static junction/cloud placeholder from redirecting the first
     # lookup into a network or hydration path.
-    $boundary = Get-TrustedPathBoundary -Path $Path
+    $item = Get-TrustedExecutableItem -Path $Path -NoCache:$NoCache
+    if ($null -eq $item) { return $null }
+    return $item.FullName
+}
+
+function Get-TrustedExecutableItem {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NoCache
+    )
+
+    $boundary = Get-TrustedPathBoundary -Path $Path -NoCache:$NoCache
     if ($null -eq $boundary) { return $null }
     $item = $null
     try {
@@ -183,7 +198,7 @@ function Resolve-TrustedExecutablePath {
         if (Test-UntrustedPathAttributes -Attributes $item.Attributes) {
             return $null
         }
-        return $item.FullName
+        return $item
     }
     catch {
         return $null
@@ -200,10 +215,14 @@ function Test-UntrustedPathAttributes {
 }
 
 function Test-LocalDrivePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NoCache
+    )
 
+    $driveName = $Path.Substring(0, 1).ToUpperInvariant()
+    $trusted = $false
     try {
-        $driveName = $Path.Substring(0, 1).ToUpperInvariant()
         $root = "{0}:\" -f $driveName
         $driveInfo = New-Object System.IO.DriveInfo($root)
         if ($driveInfo.DriveType -eq [System.IO.DriveType]::Network -or
@@ -216,11 +235,12 @@ function Test-LocalDrivePath {
         if ($drive.Root -match '^(?:\\\\|//)' -or $displayRoot -match '^(?:\\\\|//)') {
             return $false
         }
-        return $true
+        $trusted = $true
     }
     catch {
-        return $false
+        $trusted = $false
     }
+    return $trusted
 }
 
 function Get-LocalPathParts {
@@ -253,22 +273,23 @@ function Get-LocalPathParts {
 }
 
 function Get-TrustedPathBoundary {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NoCache
+    )
 
     $parts = Get-LocalPathParts -Path $Path
-    if ($null -eq $parts -or -not (Test-LocalDrivePath -Path $Path)) { return $null }
+    if ($null -eq $parts -or -not (Test-LocalDrivePath -Path $Path -NoCache:$NoCache)) { return $null }
 
     try {
         # The root is the first filesystem object inspected.  Every following
         # ancestor is checked before Join-Path is allowed to name its child.
-        $current = Get-Item -LiteralPath $parts.Root -Force -ErrorAction Stop
-        if (-not $current.PSIsContainer -or (Test-UntrustedPathAttributes -Attributes $current.Attributes)) {
+        if (-not (Test-TrustedDirectoryPath -Path $parts.Root -NoCache:$NoCache)) {
             return $null
         }
         for ($index = 0; $index -lt ($parts.Segments.Count - 1); $index++) {
             $candidatePath = Join-Path -Path $parts.Root -ChildPath (($parts.Segments[0..$index]) -join '\')
-            $current = Get-Item -LiteralPath $candidatePath -Force -ErrorAction Stop
-            if (-not $current.PSIsContainer -or (Test-UntrustedPathAttributes -Attributes $current.Attributes)) {
+            if (-not (Test-TrustedDirectoryPath -Path $candidatePath -NoCache:$NoCache)) {
                 return $null
             }
         }
@@ -283,28 +304,55 @@ function Get-TrustedPathBoundary {
     }
 }
 
-function Get-FileFingerprint {
-    param([Parameter(Mandatory = $true)][string]$Path)
+function Test-TrustedDirectoryPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NoCache
+    )
 
-    $trustedPath = Resolve-TrustedExecutablePath -Path $Path
-    if ([string]::IsNullOrWhiteSpace($trustedPath)) { return $null }
-    $info = $null
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return $item.PSIsContainer -and -not (Test-UntrustedPathAttributes -Attributes $item.Attributes)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-FileFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$NoCache
+    )
+
+    $info = Get-TrustedExecutableItem -Path $Path -NoCache:$NoCache
+    if ($null -eq $info) { return $null }
+    $trustedPath = [string]$info.FullName
+    $lastWriteUtc = $info.LastWriteTimeUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    $cacheKey = $trustedPath.ToUpperInvariant()
+    if (-not $NoCache -and $script:FingerprintCache.ContainsKey($cacheKey)) {
+        $cached = $script:FingerprintCache[$cacheKey]
+        if ($cached.Length -eq [Int64]$info.Length -and $cached.LastWriteUtc -eq $lastWriteUtc) {
+            return $cached
+        }
+    }
     $stream = $null
     $sha = $null
     try {
-        $info = Get-Item -LiteralPath $trustedPath -Force -ErrorAction Stop
         # Hashing an unexpectedly large file would make a read-only preview
         # unbounded.  Such a vendor entry is not enabled for uninstall.
         if ($info.Length -gt 128MB) { return $null }
         $sha = [System.Security.Cryptography.SHA256]::Create()
         $stream = [System.IO.File]::OpenRead($trustedPath)
         $hash = ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
-        return [PSCustomObject]@{
+        $fingerprint = [PSCustomObject]@{
             Path = $trustedPath
             Hash = $hash
             Length = [Int64]$info.Length
-            LastWriteUtc = $info.LastWriteTimeUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+            LastWriteUtc = $lastWriteUtc
         }
+        if (-not $NoCache) { $script:FingerprintCache[$cacheKey] = $fingerprint }
+        return $fingerprint
     }
     catch {
         return $null
@@ -316,10 +364,13 @@ function Get-FileFingerprint {
 }
 
 function Resolve-TrustedDirectoryPath {
-    param([AllowNull()][string]$Path)
+    param(
+        [AllowNull()][string]$Path,
+        [switch]$NoCache
+    )
 
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
-    $boundary = Get-TrustedPathBoundary -Path $Path
+    $boundary = Get-TrustedPathBoundary -Path $Path -NoCache:$NoCache
     if ($null -eq $boundary) { return $null }
     $item = $null
     try {
@@ -642,7 +693,28 @@ function New-Win32Application {
         releaseType = Get-StringValue -Key $Key -Name "ReleaseType"
         parentKeyName = Get-StringValue -Key $Key -Name "ParentKeyName"
     }
-    $parsed = Convert-UninstallCommand -Command $uninstall
+    $knownProcessNames = @(Get-KnownProcessNames -DisplayIcon $displayIcon)
+    $running = Test-RunningProcess -Names $knownProcessNames
+    $protectedReason = Get-ProtectionReason -Name $name -Publisher $publisher -SystemComponent $identity.systemComponent -NoRemove $identity.noRemove -ReleaseType $identity.releaseType -ParentKeyName $identity.parentKeyName
+    # Protected or currently-running entries cannot be executed, so avoid
+    # parsing and hashing their vendor binary during the read-only scan.
+    $skipFingerprint = (-not [string]::IsNullOrWhiteSpace($protectedReason)) -or ($running -ne $false)
+    $parsed = if ($skipFingerprint) {
+        [PSCustomObject]@{
+            Valid = $false
+            Reason = "此项目不会进入卸载执行队列"
+            Executable = ""
+            Arguments = ""
+            Hash = $identity.uninstallHash
+            IsMsi = $false
+            ProductCode = ""
+            ExecutableHash = ""
+            ExecutableLength = $null
+            ExecutableLastWriteUtc = ""
+        }
+    } else {
+        Convert-UninstallCommand -Command $uninstall
+    }
     $msiIdentityReason = ""
     if ($parsed.IsMsi) {
         if ($identity.productCode -notmatch '(?i)^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$') {
@@ -657,9 +729,6 @@ function New-Win32Application {
     $identity.uninstallExecutableHash = $parsed.ExecutableHash
     $identity.uninstallExecutableLength = $parsed.ExecutableLength
     $identity.uninstallExecutableLastWriteUtc = $parsed.ExecutableLastWriteUtc
-    $knownProcessNames = @(Get-KnownProcessNames -DisplayIcon $displayIcon)
-    $running = Test-RunningProcess -Names $knownProcessNames
-    $protectedReason = Get-ProtectionReason -Name $name -Publisher $publisher -SystemComponent $identity.systemComponent -NoRemove $identity.noRemove -ReleaseType $identity.releaseType -ParentKeyName $identity.parentKeyName
     $enabled = $parsed.Valid -and [string]::IsNullOrWhiteSpace($msiIdentityReason) -and [string]::IsNullOrWhiteSpace($protectedReason) -and $running -eq $false
     $reason = if ($protectedReason) { $protectedReason } elseif ($msiIdentityReason) { $msiIdentityReason } elseif ($null -eq $running) { "无法确认软件是否正在运行，已停止卸载" } elseif ($running) { "软件正在运行，请先退出后再卸载" } elseif (-not $parsed.Valid) { $parsed.Reason } else { "" }
     $item = [ordered]@{
@@ -750,23 +819,7 @@ function New-AppxApplication {
 
     $name = [string]$Package.Name
     $displayName = $name
-    $manifest = $null
     $knownProcessNames = @()
-    try {
-        $manifest = Get-AppxPackageManifest -Package $Package.PackageFullName -ErrorAction Stop
-        $packageNode = Get-ObjectPropertyValue -Object $manifest -Name "Package"
-        $propertiesNode = Get-ObjectPropertyValue -Object $packageNode -Name "Properties"
-        $candidate = Get-ObjectPropertyText -Object $propertiesNode -Name "DisplayName"
-        if ($candidate -and $candidate -notmatch '^ms-resource:') { $displayName = $candidate }
-        $applicationsNode = Get-ObjectPropertyValue -Object $packageNode -Name "Applications"
-        foreach ($application in @((Get-ObjectPropertyValue -Object $applicationsNode -Name "Application"))) {
-            $executable = Get-ObjectPropertyText -Object $application -Name "Executable"
-            $leaf = [System.IO.Path]::GetFileNameWithoutExtension($executable)
-            if ($leaf -match '^[A-Za-z0-9._-]{1,128}$') { $knownProcessNames += $leaf }
-        }
-    }
-    catch { }
-    $knownProcessNames = @($knownProcessNames | Select-Object -Unique | Select-Object -First 16)
     $isFramework = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsFramework")
     $isResourcePackage = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsResourcePackage")
     $isPartiallyStaged = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsPartiallyStaged")
@@ -774,6 +827,31 @@ function New-AppxApplication {
     $isBundle = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsBundle")
     $nonRemovable = [bool](Get-ObjectPropertyValue -Object $Package -Name "NonRemovable")
     $packageStatus = [string](Get-ObjectPropertyValue -Object $Package -Name "Status")
+    $signatureKind = [string](Get-ObjectPropertyValue -Object $Package -Name "SignatureKind")
+    # System/framework/runtime packages are blocked regardless of their
+    # localized display name.  Do not load their manifests merely to discover
+    # a process name that can never be offered for removal.
+    $skipManifest = $isFramework -or $isResourcePackage -or $isPartiallyStaged -or $nonRemovable -or
+        $signatureKind -eq "System" -or
+        (-not [string]::IsNullOrWhiteSpace($packageStatus) -and $packageStatus -ne "Ok") -or
+        $name -match '(?i)^(?:Microsoft\.Windows|MicrosoftWindows\.|Microsoft\.(?:PowerShell|VCLibs|NET\.|UI\.Xaml)|PowerShell|Windows\.Terminal|Microsoft\.Windows\.Wsl)|(?:Framework|Runtime|Driver|Interpreter)'
+    if (-not $skipManifest) {
+        try {
+            $manifest = Get-AppxPackageManifest -Package $Package.PackageFullName -ErrorAction Stop
+            $packageNode = Get-ObjectPropertyValue -Object $manifest -Name "Package"
+            $propertiesNode = Get-ObjectPropertyValue -Object $packageNode -Name "Properties"
+            $candidate = Get-ObjectPropertyText -Object $propertiesNode -Name "DisplayName"
+            if ($candidate -and $candidate -notmatch '^ms-resource:') { $displayName = $candidate }
+            $applicationsNode = Get-ObjectPropertyValue -Object $packageNode -Name "Applications"
+            foreach ($application in @((Get-ObjectPropertyValue -Object $applicationsNode -Name "Application"))) {
+                $executable = Get-ObjectPropertyText -Object $application -Name "Executable"
+                $leaf = [System.IO.Path]::GetFileNameWithoutExtension($executable)
+                if ($leaf -match '^[A-Za-z0-9._-]{1,128}$') { $knownProcessNames += $leaf }
+            }
+        }
+        catch { }
+    }
+    $knownProcessNames = @($knownProcessNames | Select-Object -Unique | Select-Object -First 16)
     $identity = [ordered]@{
         packageFullName = [string]$Package.PackageFullName
         name = $name
@@ -788,7 +866,7 @@ function New-AppxApplication {
         isBundle = $isBundle
         nonRemovable = $nonRemovable
         packageStatus = $packageStatus
-        signatureKind = [string](Get-ObjectPropertyValue -Object $Package -Name "SignatureKind")
+        signatureKind = $signatureKind
     }
     $running = Test-RunningProcess -Names $knownProcessNames
     $protectedReason = Get-ProtectionReason -Name $displayName -Publisher $identity.publisher -AppxName $name -IsFramework $identity.isFramework -IsResourcePackage $identity.isResourcePackage -SignatureKind $identity.signatureKind -NonRemovable $identity.nonRemovable -IsPartiallyStaged $identity.isPartiallyStaged -PackageStatus $identity.packageStatus
@@ -927,18 +1005,53 @@ function New-Result {
 }
 
 function Invoke-Win32Uninstall {
-    param([Parameter(Mandatory = $true)]$Application)
+    param(
+        [Parameter(Mandatory = $true)]$Application,
+        [AllowNull()]$ExpectedIdentity
+    )
 
     $uninstall = $Application.uninstall
     if ($null -eq $uninstall -or [string]::IsNullOrWhiteSpace([string]$uninstall.executable)) {
         return New-Result -Id ([string]$Application.id) -Name ([string]$Application.name) -Status "failed" -Message "没有可执行的官方卸载程序"
     }
-    if (-not (Test-Path -LiteralPath ([string]$uninstall.executable) -PathType Leaf)) {
-        return New-Result -Id ([string]$Application.id) -Name ([string]$Application.name) -Status "not-found" -Message "官方卸载程序已不存在"
+
+    # Compare-Identity runs before this function, but the file can still be
+    # replaced between that check and process creation.  Resolve the final
+    # executable again and compare it with the frozen preview fingerprint;
+    # this narrows the race without claiming to eliminate filesystem TOCTOU.
+    $workingDirectory = Resolve-TrustedDirectoryPath -Path (Get-ObjectPropertyText -Object $Application.identity -Name installLocation) -NoCache
+    $expected = if ($null -ne $ExpectedIdentity) { $ExpectedIdentity } else { $Application.identity }
+    $trustedExecutable = Resolve-TrustedExecutablePath -Path ([string]$uninstall.executable) -NoCache
+    if ([string]::IsNullOrWhiteSpace($trustedExecutable) -or
+        -not [StringComparer]::OrdinalIgnoreCase.Equals($trustedExecutable, [string]$uninstall.executable)) {
+        return New-Result -Id ([string]$Application.id) -Name ([string]$Application.name) -Status "identity-changed" -Message "启动前无法确认官方卸载程序仍位于预览路径，未执行"
+    }
+    $fingerprint = Get-FileFingerprint -Path $trustedExecutable -NoCache
+    $expectedHash = Get-ObjectPropertyText -Object $expected -Name "uninstallExecutableHash"
+    $expectedLength = Get-ObjectPropertyText -Object $expected -Name "uninstallExecutableLength"
+    $expectedLastWriteUtc = Get-ObjectPropertyText -Object $expected -Name "uninstallExecutableLastWriteUtc"
+    $lengthMatches = $false
+    $hashMatches = $false
+    $lastWriteMatches = $false
+    if ($null -ne $fingerprint) {
+        try {
+            $lengthMatches = [Int64]$expectedLength -eq [Int64]$fingerprint.Length
+        }
+        catch { $lengthMatches = $false }
+        $hashMatches = [StringComparer]::OrdinalIgnoreCase.Equals($expectedHash, [string]$fingerprint.Hash)
+        $lastWriteMatches = $expectedLastWriteUtc -eq [string]$fingerprint.LastWriteUtc
+    }
+    if ($null -eq $fingerprint -or
+        [string]::IsNullOrWhiteSpace($expectedHash) -or
+        [string]::IsNullOrWhiteSpace($expectedLastWriteUtc) -or
+        -not $hashMatches -or
+        -not $lengthMatches -or
+        -not $lastWriteMatches) {
+        return New-Result -Id ([string]$Application.id) -Name ([string]$Application.name) -Status "identity-changed" -Message "启动前卸载程序文件指纹与预览不一致，未执行"
     }
     try {
         $parameters = @{
-            FilePath = [string]$uninstall.executable
+            FilePath = $trustedExecutable
             Wait = $true
             PassThru = $true
             ErrorAction = "Stop"
@@ -946,7 +1059,6 @@ function Invoke-Win32Uninstall {
         if (-not [string]::IsNullOrWhiteSpace([string]$uninstall.arguments)) {
             $parameters.ArgumentList = [string]$uninstall.arguments
         }
-        $workingDirectory = Resolve-TrustedDirectoryPath -Path (Get-ObjectPropertyText -Object $Application.identity -Name installLocation)
         if ($workingDirectory) { $parameters.WorkingDirectory = $workingDirectory }
         $process = Start-Process @parameters
         $exitCode = [int]$process.ExitCode
@@ -1045,7 +1157,7 @@ function Invoke-Execute {
         $result = if ($kind -eq "appx") {
             Invoke-AppxUninstall -Application $current
         } else {
-            Invoke-Win32Uninstall -Application $current
+            Invoke-Win32Uninstall -Application $current -ExpectedIdentity $identity
         }
         [void]$results.Add($result)
         if ($result.status -eq "unknown") {

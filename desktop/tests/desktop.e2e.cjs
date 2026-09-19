@@ -4,6 +4,11 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 
+if (process.env.MOLE_PACKAGED_EXE)
+  throw new Error(
+    "Use npm run test:packaged for hardened packages; source E2E requires the development main-process test bridge.",
+  );
+
 let app, page, root, profile;
 const fixtureFiles = new Map([
   ["项目资料/design-assets.bin", 7 * 1024 * 1024],
@@ -13,6 +18,15 @@ const fixtureFiles = new Map([
   ["阅读清单.md", 256 * 1024],
 ]);
 let hashes;
+async function screenshot(name) {
+  // Capture the settled view, not the previous navigation hover/transition.
+  await page.mouse.move(1, 1);
+  await page.screenshot({
+    path: `test-results/${name}.png`,
+    fullPage: true,
+    animations: "disabled",
+  });
+}
 async function snapshot() {
   const out = {};
   for (const name of fixtureFiles.keys())
@@ -37,13 +51,7 @@ test.beforeAll(async () => {
     await fs.mkdtemp(path.join(os.tmpdir(), "mole-e2e-profile-")),
   );
   app = await electron.launch({
-    ...(process.env.MOLE_PACKAGED_EXE
-      ? { executablePath: path.resolve(process.env.MOLE_PACKAGED_EXE) }
-      : {}),
-    args: [
-      ...(process.env.MOLE_PACKAGED_EXE ? [] : [path.resolve(__dirname, "..")]),
-      `--user-data-dir=${profile}`,
-    ],
+    args: [path.resolve(__dirname, ".."), `--user-data-dir=${profile}`],
     env: {
       ...process.env,
       ELECTRON_DISABLE_SECURITY_WARNINGS: "false",
@@ -58,8 +66,8 @@ test.beforeAll(async () => {
     page.getByRole("navigation", { name: "主导航" }).getByRole("button"),
   ).toHaveCount(5);
   await page.getByRole("button", { name: "打开概览", exact: true }).click();
-  // Exercise the real main-process directory authorization path, including in
-  // packaged builds. Only the native picker response is supplied by the test.
+  // Exercise the real main-process directory authorization path. Only the
+  // native picker response is supplied by the test.
   await app.evaluate(({ dialog }, selected) => {
     dialog.showOpenDialog = async () => ({
       canceled: false,
@@ -98,7 +106,7 @@ test("overview is a real isolated desktop window with live metrics", async () =>
     };
   });
   expect(prefs).toEqual({ node: false, isolated: true, sandbox: true });
-  await page.screenshot({ path: "test-results/overview.png", fullPage: true });
+  await screenshot("overview");
 });
 
 test("scan and treemap match real fixture bytes, drill down, filter and go back", async () => {
@@ -116,7 +124,7 @@ test("scan and treemap match real fixture bytes, drill down, filter and go back"
   await expect(
     page.getByRole("button", { name: "删除", exact: true }),
   ).toHaveCount(0);
-  await page.screenshot({ path: "test-results/analyze.png", fullPage: true });
+  await screenshot("analyze");
   await page.getByRole("tab", { name: /大文件/ }).click();
   await page.getByRole("textbox", { name: "筛选结果" }).fill("weekend");
   await expect(page.locator("tbody tr")).toHaveCount(1);
@@ -166,7 +174,7 @@ test("folder chooser, empty state, denied roots and live status work", async () 
     page.getByRole("heading", { name: "每一次变化，都看得见。" }),
   ).toBeVisible();
   await expect(page.locator(".status-number").first()).not.toHaveText("—");
-  await page.screenshot({ path: "test-results/status.png", fullPage: true });
+  await screenshot("status");
   expect(await snapshot()).toEqual(hashes);
 });
 
@@ -186,6 +194,14 @@ test("maintenance pages preview real capabilities and cancelling never executes"
   ]) {
     await page.getByRole("button", { name, exact: true }).click();
     await expect(page.getByRole("heading", { name: title })).toBeVisible();
+    await expect(
+      page
+        .getByRole("navigation", { name: "主导航" })
+        .locator('[aria-current="page"]'),
+    ).toHaveText(name);
+    await expect(
+      page.locator(".maintenance-page:visible .page-heading p"),
+    ).toHaveCSS("color", "rgb(94, 112, 100)");
     if (process.platform !== "win32") {
       await expect(
         page.getByRole("button", { name: preview, exact: true }),
@@ -252,7 +268,7 @@ test("maintenance pages preview real capabilities and cancelling never executes"
       );
       expect(forged).toBe(true);
     }
-    await page.screenshot({ path: `test-results/${kind}.png`, fullPage: true });
+    await screenshot(kind);
   }
   expect(await snapshot()).toEqual(hashes);
 });
@@ -398,12 +414,32 @@ test("a pending operation survives an app restart and requires explicit recovery
   ).toBeVisible();
   const before = await page.evaluate(() => window.mole.maintenanceState());
   expect(before.recovery.required).toBe(true);
+  // Read-only previews remain usable while recovery is required. Their IDs
+  // must disappear from every mounted page once recovery rebuilds services.
+  await page.getByRole("button", { name: "性能维护", exact: true }).click();
+  await page.getByRole("button", { name: "检查维护选项", exact: true }).click();
+  await expect(
+    page.locator(".maintenance-page:visible").getByText(/预览清单 ·/),
+  ).toBeVisible({ timeout: 30000 });
+  const selectable = page.locator(
+    '.maintenance-page:visible input[type="checkbox"]:enabled',
+  );
+  if (await selectable.count()) await selectable.first().check();
+  await page.getByRole("button", { name: "垃圾清理", exact: true }).click();
   await app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async () => ({ response: 0 });
   });
-  expect(
-    (await page.evaluate(() => window.mole.maintenanceRecover())).cancelled,
-  ).toBe(true);
+  await page
+    .getByRole("button", { name: "操作记录与恢复", exact: true })
+    .click();
+  const recoveryDialog = page.getByRole("dialog");
+  await expect(recoveryDialog).toBeVisible();
+  await recoveryDialog
+    .getByRole("button", { name: "我已核查，申请解除保护" })
+    .click();
+  await expect(
+    recoveryDialog.getByText("写入保护锁已启用", { exact: true }),
+  ).toBeVisible();
   expect(
     (await page.evaluate(() => window.mole.maintenanceState())).recovery
       .required,
@@ -411,10 +447,27 @@ test("a pending operation survives an app restart and requires explicit recovery
   await app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async () => ({ response: 1 });
   });
-  await page.evaluate(() => window.mole.maintenanceRecover());
+  await screenshot("recovery");
+  await recoveryDialog
+    .getByRole("button", { name: "我已核查，申请解除保护" })
+    .click();
+  await expect(
+    recoveryDialog.getByText("已人工核查", { exact: false }),
+  ).toBeVisible();
   expect(
     (await page.evaluate(() => window.mole.maintenanceState())).recovery
       .required,
   ).toBe(false);
+  await recoveryDialog
+    .getByRole("button", { name: "关闭", exact: true })
+    .click();
+  await expect(
+    page.getByText("上次操作需要核查，写入已锁定", { exact: true }),
+  ).toBeHidden();
+  await page.getByRole("button", { name: "性能维护", exact: true }).click();
+  await expect(
+    page.locator(".maintenance-page:visible").getByText(/预览清单 ·/),
+  ).toHaveCount(0);
+  await expect(page.locator('input[type="checkbox"]:checked')).toHaveCount(0);
   expect(await snapshot()).toEqual(hashes);
 });

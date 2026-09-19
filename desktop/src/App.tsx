@@ -127,6 +127,8 @@ export function App() {
   const [maintenanceJob, setMaintenanceJob] =
     useState<MaintenanceProgress | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState>();
+  const [recoveryEpoch, setRecoveryEpoch] = useState(0);
+  const recoveryWasRequired = useRef(false);
   const [boot, setBoot] = useState<Bootstrap>();
   const [metrics, setMetrics] = useState<Metrics>();
   const [history, setHistory] = useState<Metrics[]>([]);
@@ -154,6 +156,15 @@ export function App() {
         .maintenanceState()
         .then((state) => {
           if (live) {
+            if (recoveryWasRequired.current && !state.recovery.required) {
+              // Recovery rebuilds backend services and revokes every old ID.
+              setRecoveryEpoch((value) => value + 1);
+              setResult(undefined);
+              setProgress(undefined);
+              setScanState("idle");
+              setFileNotice("恢复核查已完成。请重新扫描后再选择文件。");
+            }
+            recoveryWasRequired.current = state.recovery.required;
             setRecovery(state.recovery);
             setMaintenanceJob(state.operation);
           }
@@ -522,7 +533,7 @@ export function App() {
             </div>
           )}
           {(["cleanup", "applications", "optimize"] as const).map((kind) => (
-            <div key={kind} hidden={page !== kind}>
+            <div key={`${kind}:${recoveryEpoch}`} hidden={page !== kind}>
               <Maintenance
                 kind={kind}
                 active={page === kind}

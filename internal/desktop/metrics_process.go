@@ -87,10 +87,9 @@ func collectProcessMetrics(ctx context.Context) (ProcessMetrics, error) {
 		} else if firstErr == nil {
 			firstErr = err
 		}
-		if value, err := p.StatusWithContext(ctx); err == nil && len(value) > 0 {
-			status := value[0]
-			metric.Status = &status
-		}
+		// The dashboard does not display process state. Querying it spawns a
+		// separate ps process per PID on Darwin and is unsupported on Windows;
+		// leave this optional field unavailable instead of paying that cost.
 		return firstErr
 	})
 

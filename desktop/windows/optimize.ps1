@@ -183,8 +183,8 @@ function Invoke-DiskOptimization {
             $allowed[[string]$drive.identity] = $drive
         }
     }
-    $targets = @($requested | Where-Object { $allowed.ContainsKey(([string]$_.identity).ToUpperInvariant()) })
-    $rejected = @($requested | Where-Object { -not $allowed.ContainsKey(([string]$_.identity).ToUpperInvariant()) })
+    $targets = @($requested | Where-Object { $allowed.ContainsKey(([string]$_.identity).ToUpperInvariant()) -and $allowed[([string]$_.identity).ToUpperInvariant()].driveLetter -eq $_.driveLetter })
+    $rejected = @($requested | Where-Object { -not ($allowed.ContainsKey(([string]$_.identity).ToUpperInvariant()) -and $allowed[([string]$_.identity).ToUpperInvariant()].driveLetter -eq $_.driveLetter) })
     if ($targets.Count -eq 0) {
         return [pscustomobject][ordered]@{
             ok = $false
@@ -200,7 +200,7 @@ function Invoke-DiskOptimization {
         try {
             # With no mode switch Windows chooses its documented default:
             # TRIM for supported SSDs and analysis/defrag for HDDs.
-            Optimize-Volume -DriveLetter ([char]$drive.Substring(0, 1)) -ErrorAction Stop | Out-Null
+            Optimize-Volume -DriveLetter ([char]([string]$drive.driveLetter).Substring(0, 1)) -ErrorAction Stop | Out-Null
             $results += [pscustomobject][ordered]@{
                 driveLetter = [string]$drive.driveLetter
                 identity = [string]$drive.identity
