@@ -19,6 +19,8 @@
 
 已发布基线保留在 [0.2.0 Windows Core](https://github.com/ZhangFeiii/Mole/releases/tag/v0.2.0-windows-core)。当前 0.3.0 属于独立评审分支，不覆盖旧包。
 
+0.3.0 的固定验收构建为 [35444938482](https://github.com/ZhangFeiii/Mole/actions/runs/35444938482)，对应代码 `fc94c3da`，已覆盖交付单文件 EXE 的实际自解压启动。测试数量、校验值和 Mac 对照边界见 [VALIDATION.md](VALIDATION.md)。
+
 在本 fork 的 [Windows Desktop Core 构建](https://github.com/ZhangFeiii/Mole/actions/workflows/desktop.yml) 选择 `codex/windows-review` 分支的**成功运行**，下载 `Mole-Desktop-Core-Windows-x64-unsigned` artifact。失败运行不作为可用发行版。
 解压后运行 `Mole-Desktop-0.3.0-win-x64.exe`，用 `SHA256SUMS.txt` 核验完整性。签名门槛启用且验证成功的构建才使用 `-signed` artifact 名称。
 
