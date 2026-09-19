@@ -19,8 +19,7 @@ type ReviewKind = "cleanup" | "applications" | "optimize";
 const content = {
   cleanup: {
     title: "让空间回到你手中。",
-    subtitle:
-      "识别标准缓存位置，按类别审查。你的文档、登录资料和项目始终保留。",
+    subtitle: "按标准缓存位置分类审查，不扫描文档目录、登录资料或项目目录。",
     scan: "扫描可清理缓存",
     action: "移入回收站",
     empty: "当前批次没有符合规则的缓存。",
@@ -428,7 +427,10 @@ export function ReviewWorkspace({
           </div>
           {(plan.partial || plan.hasMore) && (
             <div className="notice warning">
-              扫描尚未完整结束。这只是当前批次，不代表所有缓存或全部可回收空间。
+              {plan.hasMore
+                ? "本批扫描已结束，仍有后续批次。查看下一批会清空当前选择。"
+                : "本次扫描已结束，部分范围因保护或读取限制未纳入。"}
+              此结果不代表所有缓存或全部可回收空间。
             </div>
           )}
           {plan.warnings?.length ? (
@@ -440,54 +442,56 @@ export function ReviewWorkspace({
             </details>
           ) : null}
           <section className="files-panel">
-            <div className="files-toolbar review-filters">
-              <input
-                aria-label="筛选维护项目"
-                placeholder={
-                  kind === "applications"
-                    ? "搜索软件或发布者"
-                    : "搜索名称或路径"
-                }
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-              <select
-                aria-label="筛选可用性"
-                value={filter}
-                onChange={(event) =>
-                  setFilter(event.target.value as ItemFilter)
-                }
-              >
-                <option value="all">全部项目</option>
-                <option value="available">可操作</option>
-                <option value="blocked">受保护 / 不适用</option>
-                {kind === "applications" && (
-                  <option value="running">运行中</option>
-                )}
-              </select>
-              <select
-                aria-label="维护列表排序"
-                value={sort}
-                onChange={(event) => setSort(event.target.value)}
-              >
-                <option value="size">按大小</option>
-                <option value="name">按名称</option>
-              </select>
-              {kind === "cleanup" && pageGroups.length > 1 && (
+            {kind !== "optimize" && (
+              <div className="files-toolbar review-filters">
+                <input
+                  aria-label="筛选维护项目"
+                  placeholder={
+                    kind === "applications"
+                      ? "搜索软件或发布者"
+                      : "搜索名称或路径"
+                  }
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
                 <select
-                  aria-label="清理类别"
-                  value={group}
-                  onChange={(event) => setGroup(event.target.value)}
+                  aria-label="筛选可用性"
+                  value={filter}
+                  onChange={(event) =>
+                    setFilter(event.target.value as ItemFilter)
+                  }
                 >
-                  <option value="">所有类别</option>
-                  {pageGroups.map((value) => (
-                    <option key={value.id} value={value.id}>
-                      {value.name} · {value.count}
-                    </option>
-                  ))}
+                  <option value="all">全部项目</option>
+                  <option value="available">可操作</option>
+                  <option value="blocked">受保护 / 不适用</option>
+                  {kind === "applications" && (
+                    <option value="running">运行中</option>
+                  )}
                 </select>
-              )}
-            </div>
+                <select
+                  aria-label="维护列表排序"
+                  value={sort}
+                  onChange={(event) => setSort(event.target.value)}
+                >
+                  <option value="size">按大小</option>
+                  <option value="name">按名称</option>
+                </select>
+                {kind === "cleanup" && pageGroups.length > 1 && (
+                  <select
+                    aria-label="清理类别"
+                    value={group}
+                    onChange={(event) => setGroup(event.target.value)}
+                  >
+                    <option value="">所有类别</option>
+                    {pageGroups.map((value) => (
+                      <option key={value.id} value={value.id}>
+                        {value.name} · {value.count}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
             <div className="selection-presets">
               <span>预览清单 · {plan.items.length} 项</span>
               {kind === "cleanup" && (
@@ -501,13 +505,15 @@ export function ReviewWorkspace({
                   推荐项
                 </button>
               )}
-              <button
-                className="text-button"
-                disabled={running}
-                onClick={() => setSelected(selectionFor(visible, "all"))}
-              >
-                选择当前筛选
-              </button>
+              {kind !== "optimize" && (
+                <button
+                  className="text-button"
+                  disabled={running}
+                  onClick={() => setSelected(selectionFor(visible, "all"))}
+                >
+                  选择当前筛选
+                </button>
+              )}
               <button
                 className="text-button"
                 disabled={running || !selected.length}

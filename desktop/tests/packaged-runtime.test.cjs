@@ -267,6 +267,13 @@ test(
             0,
             `${navigation} unexpectedly selected a maintenance item`,
           );
+          assert.equal(
+            await page
+              .locator(".maintenance-page:visible")
+              .getByRole("textbox", { name: "筛选维护项目" })
+              .count(),
+            filename === "optimize" ? 0 : 1,
+          );
         }
         await page.mouse.move(1, 1);
         await page.screenshot({

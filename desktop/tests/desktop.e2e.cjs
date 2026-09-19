@@ -222,6 +222,11 @@ test("maintenance pages preview real capabilities and cancelling never executes"
       ).toBeVisible({
         timeout: 90000,
       });
+      await expect(
+        page
+          .locator(".maintenance-page:visible")
+          .getByRole("textbox", { name: "筛选维护项目" }),
+      ).toHaveCount(kind === "optimize" ? 0 : 1);
       await expect(page.locator('input[type="checkbox"]:checked')).toHaveCount(
         0,
       );
