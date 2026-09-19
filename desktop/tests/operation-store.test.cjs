@@ -148,3 +148,43 @@ test("audit appends complete JSON records and syncs them before returning", asyn
     ["started", "finished"],
   );
 });
+
+test("acknowledged recovery rebuilds internal services and excludes concurrent previews", async () => {
+  const directory = path.join(await root(), "journal");
+  const store = createOperationStore({ directory });
+  await store.begin(operation);
+  const services = {
+    cleanup: {
+      preview: async () => {
+        throw new Error("old service remains locked");
+      },
+      execute: async () => ({ results: [] }),
+    },
+  };
+  let approve,
+    resets = 0;
+  const controller = createMaintenanceController({
+    services,
+    journal: store,
+    platform: "win32",
+    audit: async () => {},
+    confirm: () =>
+      new Promise((resolve) => {
+        approve = resolve;
+      }),
+    onRecovery: async () => {
+      resets++;
+      services.cleanup = {
+        preview: async () => ({ id: "fresh", items: [] }),
+        execute: async () => ({ results: [] }),
+      };
+    },
+  });
+  const recovering = controller.acknowledgeRecovery();
+  await assert.rejects(controller.preview("cleanup"), /正在进行/);
+  while (!approve) await new Promise((resolve) => setImmediate(resolve));
+  approve(true);
+  await recovering;
+  assert.equal(resets, 1);
+  assert.equal((await controller.preview("cleanup")).id, "fresh");
+});

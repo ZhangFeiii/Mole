@@ -283,34 +283,42 @@ async function createWindow() {
       ? path.join(process.resourcesPath, "windows")
       : path.join(__dirname, "../windows"),
   });
-  maintenance = createMaintenanceController({
-    services: {
-      cleanup: createCleanupService({
-        executable,
+  const createServices = () => ({
+    cleanup: createCleanupService({
+      executable,
+      home,
+      protectionDirectory: path.join(userData, "protected-items"),
+      inspectAttributes: nativeInspect,
+      readActivity,
+      trashItem: (value) => shell.trashItem(value),
+    }),
+    applications: createApplicationsService({ runPowerShell }),
+    optimize: createOptimizeService({ runPowerShell }),
+    files: (() => {
+      const engine = createSafeTrashEngine({
         home,
-        protectionDirectory: path.join(userData, "protected-items"),
+        executable,
         inspectAttributes: nativeInspect,
         readActivity,
+        protectionDirectory: path.join(userData, "protected-items"),
         trashItem: (value) => shell.trashItem(value),
-      }),
-      applications: createApplicationsService({ runPowerShell }),
-      optimize: createOptimizeService({ runPowerShell }),
-      files: (() => {
-        const engine = createSafeTrashEngine({
-          home,
-          executable,
-          inspectAttributes: nativeInspect,
-          readActivity,
-          protectionDirectory: path.join(userData, "protected-items"),
-          trashItem: (value) => shell.trashItem(value),
-          authorizeSelection: (ids) => analysisSelections.authorize(ids),
-        });
-        return {
-          ...engine,
-          preview: ({ selectionIds, ...options }) =>
-            engine.preview(selectionIds, options),
-        };
-      })(),
+        authorizeSelection: (ids) => analysisSelections.authorize(ids),
+      });
+      return {
+        ...engine,
+        preview: ({ selectionIds, ...options }) =>
+          engine.preview(selectionIds, options),
+      };
+    })(),
+  });
+  const services = createServices();
+  maintenance = createMaintenanceController({
+    services,
+    onRecovery: async () => {
+      await assetVerifier.verifyAll();
+      for (const service of Object.values(services)) service.close?.();
+      Object.assign(services, createServices());
+      analysisSelections.clear();
     },
     audit: createAuditLog(path.join(userData, "maintenance-logs"), {
       inspectAttributes: nativeInspect,

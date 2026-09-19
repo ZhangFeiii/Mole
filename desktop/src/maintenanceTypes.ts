@@ -43,7 +43,7 @@ export interface MaintenancePlan {
 }
 export interface MaintenanceProgress {
   id: string;
-  kind: MaintenanceKind;
+  kind: MaintenanceKind | "recovery" | "protection";
   phase: "preview" | "confirm" | "execute" | "idle";
   cancelled?: boolean;
   completed?: number;

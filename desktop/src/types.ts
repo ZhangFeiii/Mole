@@ -117,7 +117,7 @@ export interface MoleBridge {
     recovery: RecoveryState;
     operation: MaintenanceProgress | null;
   }>;
-  maintenanceCancel(kind?: MaintenanceKind): Promise<boolean>;
+  maintenanceCancel(kind?: MaintenanceProgress["kind"]): Promise<boolean>;
   maintenanceRecover(): Promise<RecoveryState>;
   protect(planId: string, itemId: string): Promise<unknown>;
   protectedItems(): Promise<ProtectedItem[]>;

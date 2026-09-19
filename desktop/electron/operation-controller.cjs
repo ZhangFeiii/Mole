@@ -44,6 +44,7 @@ function createMaintenanceController({
   platform = process.platform,
   now = Date.now,
   onChange = () => {},
+  onRecovery = async () => {},
 }) {
   const plans = new Map(),
     views = new Map();
@@ -153,7 +154,7 @@ function createMaintenanceController({
     cancel(kind) {
       if (!active || (kind && active.kind !== kind)) return false;
       active.controller.abort();
-      services[active.kind].cancel?.();
+      services[active.kind]?.cancel?.();
       emit(active, {
         message:
           active.phase === "preview"
@@ -164,34 +165,42 @@ function createMaintenanceController({
     },
     async acknowledgeRecovery() {
       if (active) throw new Error("当前任务尚未结束");
-      const recovery = await journal.snapshot();
-      if (recovery.corrupt)
-        throw new Error(recovery.reason + "；不能自动覆盖损坏的记录");
-      if (!recovery.required && !uncertain) return recovery;
-      const approved = await confirm({
-        kind: "recovery",
-        title: "确认已经核查上次任务",
-        items: [],
-        detail:
-          "请先检查 Windows 任务管理器、卸载向导、文件位置与回收站，确认没有仍在执行的维护。继续只解除保护锁，不会重试旧操作。",
-      });
-      if (!approved) return { ...recovery, cancelled: true };
-      await audit({
-        event: "recovery-acknowledged",
-        operationId: recovery.active?.id,
-      });
-      await journal.acknowledge();
-      uncertain = false;
-      plans.clear();
-      views.clear();
-      return journal.snapshot();
+      const job = beginJob("recovery", "confirm");
+      try {
+        const recovery = await journal.snapshot();
+        if (recovery.corrupt)
+          throw new Error(recovery.reason + "；不能自动覆盖损坏的记录");
+        if (!recovery.required && !uncertain) return recovery;
+        const approved = await confirm({
+          kind: "recovery",
+          title: "确认已经核查上次任务",
+          items: [],
+          detail:
+            "请先检查 Windows 任务管理器、卸载向导、文件位置与回收站，确认没有仍在执行的维护。继续只解除保护锁，不会重试旧操作。",
+        });
+        if (!approved || job.abandoned || job.controller.signal.aborted)
+          return { ...recovery, cancelled: true };
+        await onRecovery();
+        await audit({
+          event: "recovery-acknowledged",
+          operationId: recovery.active?.id,
+        });
+        await journal.acknowledge();
+        uncertain = false;
+        plans.clear();
+        views.clear();
+        return journal.snapshot();
+      } finally {
+        emit(job, { phase: "idle" });
+        if (active === job) active = undefined;
+      }
     },
     async abandon() {
       if (!active) return;
       const job = active;
       job.abandoned = true;
       job.controller.abort();
-      services[job.kind].cancel?.();
+      services[job.kind]?.cancel?.();
       if (job.persisted) {
         uncertain = true;
         await journal.finish(job.id, { results: [] }, true);
@@ -260,10 +269,16 @@ function createMaintenanceController({
         throw new Error("预览已变化，请重新扫描");
       if (typeof services.cleanup.protect !== "function")
         throw new Error("当前清理服务不支持自定义保护");
-      const result = await services.cleanup.protect(planId, itemId);
-      plans.delete("cleanup");
-      views.delete("cleanup");
-      return result;
+      const job = beginJob("protection", "execute");
+      try {
+        const result = await services.cleanup.protect(planId, itemId);
+        plans.delete("cleanup");
+        views.delete("cleanup");
+        return result;
+      } finally {
+        emit(job, { phase: "idle" });
+        if (active === job) active = undefined;
+      }
     },
     async listProtected() {
       checkKind("cleanup");
@@ -272,25 +287,33 @@ function createMaintenanceController({
     async removeProtection(id) {
       checkKind("cleanup");
       if (active) throw new Error("请等待当前任务结束");
-      if (typeof id !== "string" || id.length > 100)
-        throw new Error("无效的保护项标识");
-      const all = await services.cleanup.listProtected();
-      const item = all.find((value) => value.id === id);
-      if (!item) throw new Error("保护项不存在");
-      if (
-        !(await confirm({
-          kind: "protection",
-          title: "取消此项自定义保护",
-          items: [{ name: item.path || item.name }],
-          detail:
-            "这不会删除文件；此项会在下次扫描时重新按清理规则评估。内置保护不会改变。",
-        }))
-      )
-        return { cancelled: true };
-      await services.cleanup.removeProtected(id);
-      plans.delete("cleanup");
-      views.delete("cleanup");
-      return { removed: true };
+      const job = beginJob("protection", "confirm");
+      try {
+        if (typeof id !== "string" || id.length > 100)
+          throw new Error("无效的保护项标识");
+        const all = await services.cleanup.listProtected();
+        const item = all.find((value) => value.id === id);
+        if (!item) throw new Error("保护项不存在");
+        if (
+          !(await confirm({
+            kind: "protection",
+            title: "取消此项自定义保护",
+            items: [{ name: item.path || item.name }],
+            detail:
+              "这不会删除文件；此项会在下次扫描时重新按清理规则评估。内置保护不会改变。",
+          }))
+        )
+          return { cancelled: true };
+        if (job.controller.signal.aborted || job.abandoned)
+          return { cancelled: true };
+        await services.cleanup.removeProtected(id);
+        plans.delete("cleanup");
+        views.delete("cleanup");
+        return { removed: true };
+      } finally {
+        emit(job, { phase: "idle" });
+        if (active === job) active = undefined;
+      }
     },
     async execute(kind, planId, selectedIds) {
       checkKind(kind);
