@@ -174,6 +174,9 @@ test("folder chooser, empty state, denied roots and live status work", async () 
     page.getByRole("heading", { name: "每一次变化，都看得见。" }),
   ).toBeVisible();
   await expect(page.locator(".status-number").first()).not.toHaveText("—");
+  await expect(
+    page.getByText("本地 Go 采集器 · 不自动提权", { exact: true }),
+  ).toBeVisible();
   await screenshot("status");
   expect(await snapshot()).toEqual(hashes);
 });
@@ -276,6 +279,34 @@ test("maintenance pages preview real capabilities and cancelling never executes"
     await screenshot(kind);
   }
   expect(await snapshot()).toEqual(hashes);
+});
+
+test("minimum window keeps all navigation visible without sidebar scrolling", async () => {
+  const original = await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const bounds = window.getBounds();
+    window.setSize(980, 680);
+    return bounds;
+  });
+  try {
+    await expect(page.locator(".sidebar .safety-note")).toBeHidden();
+    const layout = await page.locator(".sidebar").evaluate((sidebar) => ({
+      height: sidebar.clientHeight,
+      contentHeight: sidebar.scrollHeight,
+      width: sidebar.clientWidth,
+      contentWidth: sidebar.scrollWidth,
+    }));
+    expect(layout.contentHeight).toBeLessThanOrEqual(layout.height);
+    expect(layout.contentWidth).toBeLessThanOrEqual(layout.width);
+    await expect(
+      page.getByRole("button", { name: "操作记录与恢复", exact: true }),
+    ).toBeInViewport();
+    await screenshot("compact-window");
+  } finally {
+    await app.evaluate(({ BrowserWindow }, bounds) => {
+      BrowserWindow.getAllWindows()[0].setBounds(bounds);
+    }, original);
+  }
 });
 
 test("Windows recycle bin receives only a dedicated disposable cache fixture", async () => {

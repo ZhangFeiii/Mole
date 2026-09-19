@@ -1163,7 +1163,7 @@ export function App() {
                   </div>
                   <div>
                     <dt>读取方式</dt>
-                    <dd>本地 Go 采集器 · 普通用户权限</dd>
+                    <dd>本地 Go 采集器 · 不自动提权</dd>
                   </div>
                 </dl>
               </section>

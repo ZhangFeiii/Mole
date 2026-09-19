@@ -116,6 +116,24 @@
 }
 .records-button {
   font-size: 11px;
+  white-space: nowrap;
+  gap: 8px;
+  padding-inline: 12px;
+}
+@media (max-height: 760px) {
+  .sidebar {
+    padding-top: 22px;
+    padding-bottom: 14px;
+  }
+  .sidebar .brand {
+    margin-bottom: 20px;
+  }
+  .sidebar .safety-note {
+    display: none;
+  }
+  .sidebar-divider {
+    margin-block: 15px;
+  }
 }
 .recovery-dot {
   width: 7px;
