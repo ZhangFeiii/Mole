@@ -97,6 +97,94 @@ test("preview is read-only and only known old cache files are eligible", async (
   assert.equal(plan.items[0].enabled, true);
 });
 
+test("production LOCALAPPDATA cannot redirect cleanup into Documents or other roots", async () => {
+  const f = await fixture();
+  const documents = path.join(f.home, "Documents");
+  const privateFile = path.join(documents, "Temp", "old.tmp");
+  await fs.mkdir(path.dirname(privateFile), { recursive: true });
+  await fs.writeFile(privateFile, "important-user-data");
+  let inspections = 0,
+    mutations = 0;
+  for (const local of [
+    documents,
+    f.home,
+    path.join(f.home, "Downloads"),
+    path.join(f.home, "AppData", "Roaming"),
+    "AppData/Local",
+    "",
+  ]) {
+    const service = createCleanupService({
+      platform: "win32",
+      home: f.home,
+      env: { LOCALAPPDATA: local },
+      now: () => f.now.value,
+      inspectAttributes: async (paths) => {
+        inspections++;
+        return f.inspector(paths);
+      },
+      trashItem: async () => {
+        mutations++;
+      },
+    });
+    await assert.rejects(service.preview(), /规范 AppData\/Local/);
+  }
+  assert.equal(inspections, 0);
+  assert.equal(mutations, 0);
+  assert.equal(await fs.readFile(privateFile, "utf8"), "important-user-data");
+});
+
+test("production defaults use only the trusted home AppData Local cache", async () => {
+  const f = await fixture();
+  const local = path.join(f.home, "AppData", "Local");
+  const cacheFile = path.join(local, "Temp", "old.tmp");
+  const privateFile = path.join(f.home, "Documents", "Temp", "old.tmp");
+  for (const target of [cacheFile, privateFile]) {
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, "preserve-until-confirmed");
+  }
+  for (const env of [
+    {},
+    { LOCALAPPDATA: local, USERPROFILE: path.join(f.home, "Documents") },
+  ]) {
+    const service = createCleanupService({
+      platform: "win32",
+      home: f.home,
+      env,
+      now: () => f.now.value,
+      inspectAttributes: f.inspector,
+      trashItem: async () => assert.fail("preview must not mutate"),
+    });
+    const plan = await service.preview();
+    assert.deepEqual(
+      plan.items.map((item) => item.path),
+      [cacheFile],
+    );
+  }
+  assert.equal(
+    await fs.readFile(privateFile, "utf8"),
+    "preserve-until-confirmed",
+  );
+});
+
+test("Windows production requires an explicit trusted home instead of environment inference", async () => {
+  const f = await fixture();
+  let calls = 0;
+  const service = createCleanupService({
+    platform: "win32",
+    env: {
+      USERPROFILE: f.home,
+      LOCALAPPDATA: path.join(f.home, "AppData", "Local"),
+    },
+    inspectAttributes: async () => {
+      calls++;
+      return [];
+    },
+    trashItem: async () => assert.fail("must not mutate"),
+  });
+  await assert.rejects(service.preview(), /主进程提供/);
+  assert.equal(calls, 0);
+});
+
 test("only selected IDs move to injected fixture trash; plans cannot replay", async () => {
   const f = await fixture();
   const a = await f.file("a.tmp"),

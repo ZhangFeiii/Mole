@@ -163,6 +163,7 @@ function preventUntrackedExit(event) {
   }
 }
 async function createWindow() {
+  home = await fs.realpath(app.getPath("home"));
   const runPowerShell = createPowerShellRunner({
     scriptsDirectory: app.isPackaged
       ? path.join(process.resourcesPath, "windows")
@@ -172,6 +173,7 @@ async function createWindow() {
     services: {
       cleanup: createCleanupService({
         executable,
+        home,
         trashItem: (value) => shell.trashItem(value),
       }),
       applications: createApplicationsService({ runPowerShell }),
@@ -205,7 +207,6 @@ async function createWindow() {
       return choice.response === 1;
     },
   });
-  home = await fs.realpath(app.getPath("home"));
   roots = [home];
   window = new BrowserWindow({
     width: 1280,
