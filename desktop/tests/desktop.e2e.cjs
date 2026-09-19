@@ -3,6 +3,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
+const { pathToFileURL } = require("node:url");
 
 if (process.env.MOLE_PACKAGED_EXE)
   throw new Error(
@@ -306,6 +307,55 @@ test("minimum window keeps all navigation visible without sidebar scrolling", as
     await app.evaluate(({ BrowserWindow }, bounds) => {
       BrowserWindow.getAllWindows()[0].setBounds(bounds);
     }, original);
+  }
+});
+
+test("trusted entrypoint works from a local path with spaces, Unicode and URL metacharacters", async () => {
+  test.setTimeout(90000);
+  const directory = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "mole-entry-路径 100% #-")),
+  );
+  const alternateProfile = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "mole-entry-profile-")),
+  );
+  for (const name of [
+    "electron",
+    "dist",
+    "windows",
+    "resources",
+    "package.json",
+  ]) {
+    await fs.cp(
+      path.resolve(__dirname, "..", name),
+      path.join(directory, name),
+      { recursive: true },
+    );
+  }
+  let alternate;
+  try {
+    alternate = await electron.launch({
+      args: [directory, `--user-data-dir=${alternateProfile}`],
+    });
+    const alternatePage = await alternate.firstWindow();
+    await alternatePage.waitForLoadState("domcontentloaded");
+    const url = new URL(alternatePage.url());
+    expect(url.href).toBe(
+      pathToFileURL(path.join(directory, "dist/index.html")).href,
+    );
+    expect(url.protocol).toBe("file:");
+    expect(url.hash).toBe("");
+    expect(url.search).toBe("");
+    const bootstrap = await alternatePage.evaluate(() =>
+      window.mole.bootstrap(),
+    );
+    expect(bootstrap.platform).toBe(process.platform);
+    await expect(
+      alternatePage
+        .getByRole("navigation", { name: "主导航" })
+        .getByRole("button"),
+    ).toHaveCount(5);
+  } finally {
+    await alternate?.close();
   }
 });
 

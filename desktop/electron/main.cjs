@@ -385,7 +385,9 @@ async function createWindow() {
     window = undefined;
   });
   window.once("ready-to-show", () => window.show());
-  await window.loadFile(indexPath);
+  // Navigation and IPC must use the same canonical URL. loadFile applies a
+  // different legacy serializer to Windows paths and URL metacharacters.
+  await window.loadURL(trustedURL);
 }
 
 app
