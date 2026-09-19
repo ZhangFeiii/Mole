@@ -26,6 +26,7 @@ const EXECUTION_STATUSES = new Set([
   "identity-changed",
   "blocked",
   "rejected",
+  "skipped",
 ]);
 
 const PROTECTED_NAME_PATTERNS = [
@@ -40,6 +41,9 @@ const PROTECTED_NAME_PATTERNS = [
   /^nvidia(?:$|\s).*driver/i,
   /^amd(?:$|\s).*software/i,
   /^intel(?:$|\s).*driver/i,
+  /\bdriver\b/i,
+  /^(?:powershell|python|node\.js|ruby|perl|php)(?:$|\s)/i,
+  /^(?:windows terminal|windows subsystem for linux|wsl)(?:$|\s)/i,
 ];
 
 const PROTECTED_APPX_NAMES = new Set([
@@ -158,6 +162,11 @@ function normalizeIdentity(item, kind) {
           "signatureKind",
           "isFramework",
           "isResourcePackage",
+          "isPartiallyStaged",
+          "isOptionalPackage",
+          "isBundle",
+          "nonRemovable",
+          "packageStatus",
         ]
       : [
           "registryPath",
@@ -173,6 +182,10 @@ function normalizeIdentity(item, kind) {
           "noRemove",
           "releaseType",
           "parentKeyName",
+          "uninstallExecutableHash",
+          "uninstallExecutableLength",
+          "uninstallExecutableLastWriteUtc",
+          "msiProductCode",
         ];
   const identity = {};
   for (const key of allowed) {
@@ -206,6 +219,17 @@ function normalizeUninstall(item, kind) {
   }
   if (!executable) return null;
   return { executable, arguments: argumentsValue };
+}
+
+function normalizeProcessNames(value) {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .map((name) => safeText(name, 128))
+        .filter((name) => /^[A-Za-z0-9._-]{1,128}$/.test(name)),
+    ),
+  ].slice(0, 16);
 }
 
 function hasDangerousUninstall(uninstall) {
@@ -253,7 +277,21 @@ function isProtected(item, kind) {
     if (PROTECTED_APPX_NAMES.has(appxName)) return true;
     if (identity.isFramework === true || identity.isResourcePackage === true)
       return true;
+    if (identity.isPartiallyStaged === true || identity.nonRemovable === true)
+      return true;
+    if (
+      identity.packageStatus &&
+      safeText(identity.packageStatus).toLowerCase() !== "ok"
+    )
+      return true;
     if (/^(?:Microsoft\.Windows|MicrosoftWindows\.)/i.test(appxName))
+      return true;
+    if (
+      /^(?:microsoft\.(?:powershell|vclibs|net\.|ui\.xaml)|powershell|windows\.terminal|microsoft\.windows\wsl)/i.test(
+        appxName,
+      ) ||
+      /(?:framework|runtime|driver|interpreter)/i.test(appxName)
+    )
       return true;
     if (/\b(?:framework|resource)\b/i.test(safeText(item.description)))
       return true;
@@ -291,16 +329,27 @@ function normalizeItem(raw, seenIds) {
     { ...raw, name, identity, description: raw.description },
     kind,
   );
+  const knownProcessNames = normalizeProcessNames(raw.knownProcessNames);
+  const running = raw.running === true;
   const identityValid =
     kind === "appx"
       ? Boolean(identity.packageFullName)
       : Boolean(identity.registryPath || identity.key);
+  const executableIdentityValid =
+    kind === "appx" || Boolean(identity.uninstallExecutableHash);
   const uninstallValid = kind === "appx" || Boolean(uninstall);
-  let enabled = raw.enabled === true && identityValid && uninstallValid;
+  let enabled =
+    raw.enabled === true &&
+    identityValid &&
+    executableIdentityValid &&
+    uninstallValid;
   let reason = safeText(raw.reason, 1000);
   if (protectedItem) {
     enabled = false;
     reason = reason || "系统、运行时、驱动或框架项目受保护";
+  } else if (running) {
+    enabled = false;
+    reason = reason || "软件正在运行，请先退出后再卸载";
   } else if (!identityValid) {
     enabled = false;
     reason = reason || "缺少可重新验证的软件身份";
@@ -310,6 +359,9 @@ function normalizeItem(raw, seenIds) {
   } else if (hasDangerousUninstall(uninstall)) {
     enabled = false;
     reason = "卸载程序包含不允许的脚本或 shell 组件";
+  } else if (!executableIdentityValid) {
+    enabled = false;
+    reason = reason || "缺少卸载程序文件指纹，已停止卸载";
   } else if (!raw.enabled) {
     enabled = false;
     reason = reason || "PowerShell 未将此项目标记为可安全卸载";
@@ -337,6 +389,9 @@ function normalizeItem(raw, seenIds) {
     }
   }
   if (raw.requiresElevation === true) publicItem.requiresElevation = true;
+  if (typeof raw.running === "boolean") publicItem.running = running;
+  if (Array.isArray(raw.knownProcessNames))
+    publicItem.knownProcessNames = knownProcessNames;
   if (protectedItem) publicItem.protected = true;
   if (!enabled && reason) publicItem.reason = reason;
 
@@ -355,7 +410,18 @@ function normalizeExecutionStatus(value) {
   return EXECUTION_STATUSES.has(status) ? status : "failed";
 }
 
-function normalizeResult(raw, fallback) {
+function normalizeResult(raw, fallback, missingStatus = "unknown") {
+  if (!isRecord(raw)) {
+    return {
+      id: fallback.id,
+      name: fallback.name,
+      status: missingStatus,
+      message:
+        missingStatus === "skipped"
+          ? "前一项结果未知，未继续执行；请先检查 Windows 状态"
+          : "原生卸载未返回完整逐项结果，结果未知；请先检查 Windows 状态",
+    };
+  }
   const source = isRecord(raw) ? raw : {};
   const result = {
     id: fallback.id,
@@ -461,13 +527,15 @@ function createApplicationsService(options = {}) {
     };
   }
 
-  async function execute(planId, selectedIds) {
+  async function execute(planId, selectedIds, options = {}) {
     if (platform !== "win32")
       throw makeError("当前平台不支持实际软件卸载", "UNSUPPORTED_PLATFORM");
     if (typeof planId !== "string" || !planId)
       throw makeError("无效的软件计划 ID", "INVALID_PLAN");
     if (!Array.isArray(selectedIds) || selectedIds.length === 0)
       throw makeError("selectedIds 必须是数组", "INVALID_SELECTION");
+    const signal = isRecord(options) ? options.signal : undefined;
+    const onProgress = isRecord(options) ? options.onProgress : undefined;
     const selectionSet = new Set();
     for (const id of selectedIds) {
       if (
@@ -494,9 +562,39 @@ function createApplicationsService(options = {}) {
     plan.executing = true;
 
     const ordered = [];
-    const selected = [];
     const seen = new Set();
     const byId = new Map(plan.items.map((item) => [item.id, item]));
+    const total = selectedIds.length;
+    let completed = 0;
+
+    async function reportProgress(currentName) {
+      if (typeof onProgress !== "function") return;
+      try {
+        await onProgress({
+          completed,
+          total,
+          currentName: safeText(currentName, 512),
+        });
+      } catch {
+        // Progress is advisory.  A renderer callback must not interrupt the
+        // server-side uninstall queue or change its safety outcome.
+      }
+    }
+
+    function entryName(entry) {
+      return entry.item?.name || entry.result?.name || entry.result?.id || "";
+    }
+
+    function skippedResult(entry, message) {
+      const source = entry.item || entry.result || {};
+      return {
+        id: source.id,
+        name: source.name || "",
+        status: "skipped",
+        message,
+      };
+    }
+
     try {
       for (const id of selectedIds) {
         if (!id || seen.has(id)) continue;
@@ -524,66 +622,89 @@ function createApplicationsService(options = {}) {
           });
           continue;
         }
-        selected.push(item);
         ordered.push({ item });
       }
 
-      if (!selected.length)
-        return {
-          planId,
-          results: ordered.map((entry) => entry.result),
-          warnings: ["没有可执行的软件项目"],
-        };
+      const results = [];
+      const warnings = ordered.some((entry) => entry.item)
+        ? []
+        : ["没有可执行的软件项目"];
+      let stopped = false;
+      let stopReason = "";
+      for (const entry of ordered) {
+        const currentName = entryName(entry);
+        await reportProgress(currentName);
 
-      const request = {
-        action: "execute",
-        planId,
-        // Only the opaque identity captured by preview crosses the boundary.
-        // In particular, no executable path or shell command is accepted from
-        // the renderer.  PowerShell resolves the current command again.
-        items: selected.map((item) => ({
-          id: item.id,
-          kind: item.kind,
-          identity: cloneJson(item.identity),
-        })),
-      };
-      let payload;
-      try {
-        payload = await invoke(request, EXECUTE_TIMEOUT_MS);
-      } catch (error) {
-        const message = safeText(error.message || error) || "卸载执行器失败";
-        const status = error.code === "OUTCOME_UNKNOWN" ? "unknown" : "failed";
-        return {
-          planId,
-          results: ordered.map(
-            (entry) =>
-              entry.result || {
+        let result;
+        if (entry.result) {
+          // Rejected/protected entries never enter the native queue.  Preserve
+          // their local explanation even when a later vendor result stops the
+          // executable portion of the queue.
+          result = entry.result;
+        } else if (stopped || signal?.aborted) {
+          result = skippedResult(
+            entry,
+            stopReason === "unknown"
+              ? "前一项结果未知，未继续执行；请先检查 Windows 状态"
+              : "用户已取消，尚未开始的软件未执行",
+          );
+        } else {
+          const request = {
+            action: "execute",
+            planId,
+            // Send one opaque identity at a time.  This keeps cancellation and
+            // the unknown-outcome guard bounded to the currently running
+            // official uninstaller instead of leaving a native batch behind.
+            items: [
+              {
                 id: entry.item.id,
-                name: entry.item.name,
-                status,
-                message,
+                kind: entry.item.kind,
+                identity: cloneJson(entry.item.identity),
               },
-          ),
-          warnings: [message],
-        };
-      }
+            ],
+          };
+          try {
+            const payload = await invoke(request, EXECUTE_TIMEOUT_MS);
+            warnings.push(...normalizeWarnings(payload.warnings));
+            const raw = Array.isArray(payload.results)
+              ? payload.results.find(
+                  (candidate) => safeText(candidate?.id, 128) === entry.item.id,
+                )
+              : undefined;
+            // A missing single-item response cannot be associated with a
+            // successful uninstall, so keep the conservative unknown state.
+            result = normalizeResult(raw, entry.item, "unknown");
+          } catch (error) {
+            const message =
+              safeText(error.message || error) || "卸载执行器失败";
+            result = {
+              id: entry.item.id,
+              name: entry.item.name,
+              status: error.code === "OUTCOME_UNKNOWN" ? "unknown" : "failed",
+              message,
+            };
+            warnings.push(message);
+          }
+        }
 
-      const responseById = new Map();
-      if (Array.isArray(payload.results)) {
-        for (const raw of payload.results) {
-          const id = safeText(raw?.id, 128);
-          if (id && !responseById.has(id)) responseById.set(id, raw);
+        results.push(result);
+        completed += 1;
+        await reportProgress(currentName);
+
+        // Abort never kills the current process.  It only causes the next
+        // queued item to become skipped after this result is recorded.
+        if (result.status === "unknown") {
+          stopped = true;
+          stopReason = "unknown";
+        } else if (signal?.aborted) {
+          stopped = true;
+          if (!stopReason) stopReason = "cancel";
         }
       }
-      const results = ordered.map(
-        (entry) =>
-          entry.result ||
-          normalizeResult(responseById.get(entry.item.id), entry.item),
-      );
       return {
         planId,
         results,
-        warnings: normalizeWarnings(payload.warnings),
+        warnings: normalizeWarnings(warnings),
       };
     } finally {
       plan.executing = false;

@@ -30,6 +30,7 @@ async function authorizePath(value, roots) {
 
 function trustedSender(event, contents, expectedURL) {
   if (
+    !event ||
     !contents ||
     event.sender !== contents ||
     event.senderFrame !== contents.mainFrame
@@ -40,8 +41,14 @@ function trustedSender(event, contents, expectedURL) {
     const expected = new URL(expectedURL);
     return (
       actual.protocol === "file:" &&
-      actual.pathname === expected.pathname &&
-      !actual.search
+      expected.protocol === "file:" &&
+      !actual.host &&
+      !actual.username &&
+      !actual.password &&
+      !actual.search &&
+      !actual.hash &&
+      actual.href === expected.href &&
+      event.senderFrame.url === expected.href
     );
   } catch {
     return false;

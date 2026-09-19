@@ -16,6 +16,32 @@ func TestCommandAllowlist(t *testing.T) {
 	}
 }
 
+func TestReadOnlyStreamAndActivityRejectExtraArguments(t *testing.T) {
+	for _, args := range [][]string{{"status-stream", "1ms"}, {"activity", "chrome.exe"}, {"status-stream", "--interval=0"}, {"platform-info", "C:\\fake"}} {
+		if err := run(args, &bytes.Buffer{}); err == nil {
+			t.Fatalf("accepted configurable readonly command %v", args)
+		}
+	}
+}
+
+func TestActivityProtocol(t *testing.T) {
+	var out bytes.Buffer
+	if err := run([]string{"activity"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		Platform string   `json:"platform"`
+		Names    []string `json:"names"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Platform == "" || data.Names == nil || data.Warnings == nil {
+		t.Fatalf("invalid activity JSON: %s", out.String())
+	}
+}
+
 func TestInspectProtocolRejectsInvalidOrOversizedInput(t *testing.T) {
 	inputs := []string{`{}`, `{"paths":[]}`, `{"paths":["relative"],"command":"clean"}`, `{"paths":["relative"]} {}`, strings.Repeat(" ", 2*1024*1024+1)}
 	for _, input := range inputs {

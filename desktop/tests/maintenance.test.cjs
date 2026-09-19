@@ -35,7 +35,11 @@ test("maintenance requires fresh server plan and exact enabled IDs", async () =>
     await assert.rejects(controller.execute("cleanup", "plan", ids));
   assert.equal(calls.length, 0);
   await controller.execute("cleanup", "plan", ["ok"]);
-  assert.deepEqual(calls, [["plan", ["ok"]]]);
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 2)),
+    [["plan", ["ok"]]],
+  );
+  assert.ok(calls[0][2].signal instanceof AbortSignal);
   await assert.rejects(controller.execute("cleanup", "plan", ["ok"]), /过期/);
 });
 test("cancel and audit failure never execute", async () => {
@@ -100,6 +104,7 @@ test("confirmation cannot extend expiry and execution state covers the dialog", 
   await controller.preview("cleanup");
   const pending = controller.execute("cleanup", "plan", ["ok"]);
   assert.equal(controller.isExecuting(), true);
+  await new Promise((resolve) => setImmediate(resolve));
   now = 300000;
   allow(true);
   await assert.rejects(pending, /过期/);
@@ -160,6 +165,7 @@ test("explicit exit while confirming cannot start a deferred mutation", async ()
   });
   await controller.preview("cleanup");
   const pending = controller.execute("cleanup", "plan", ["ok"]);
+  await new Promise((resolve) => setImmediate(resolve));
   await controller.abandon();
   approve(true);
   assert.equal((await pending).cancelled, true);

@@ -52,6 +52,10 @@ test("IPC accepts only the trusted main frame of the application", () => {
     "https://evil.invalid",
     "file:///app/dist/other.html",
     `${url}?remote=1`,
+    `${url}#remote`,
+    "file://evil/app/dist/index.html",
+    "file://localhost/app/dist/index.html",
+    "file:///app/dist/%69ndex.html",
   ]) {
     frame.url = hostile;
     assert.equal(

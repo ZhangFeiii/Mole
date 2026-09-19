@@ -1,6 +1,6 @@
 {
   "name": "mole-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "An independent Windows desktop interface with reviewed, opt-in maintenance for Mole",
@@ -10,13 +10,16 @@
   "scripts": {
     "dev": "npm run build && electron .",
     "build:agent": "node scripts/build-agent.cjs",
+    "build:integrity": "node scripts/integrity-manifest.cjs",
     "build:ui": "tsc --noEmit && vite build",
-    "build": "npm run build:agent && npm run build:ui",
+    "build": "npm run build:agent && npm run build:integrity && npm run build:ui",
+    "verify:integrity": "node scripts/integrity-manifest.cjs --check",
     "start": "electron .",
     "test": "node --test tests/*.test.cjs tests/*.test.mjs",
+    "test:packaged": "node --test tests/packaged-runtime.test.cjs",
     "test:e2e": "playwright test",
-    "package:win": "npm run build && electron-builder --win portable --x64",
-    "package:dir": "npm run build && electron-builder --dir"
+    "package:win": "npm run build && electron-builder --win portable --x64 --publish never",
+    "package:dir": "npm run build && electron-builder --dir --publish never"
   },
   "dependencies": {
     "react": "19.3.0",
@@ -50,7 +53,9 @@
       {
         "from": "windows",
         "to": "windows",
-        "filter": ["*.ps1"]
+        "filter": [
+          "*.ps1"
+        ]
       },
       {
         "from": "resources",
@@ -62,12 +67,23 @@
       }
     ],
     "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true,
+      "enableEmbeddedAsarIntegrityValidation": true
+    },
     "win": {
       "target": [
         "portable"
       ],
       "requestedExecutionLevel": "asInvoker",
-      "signAndEditExecutable": false
+      "signExecutable": false,
+      "signExts": [
+        ".dll",
+        "!desktop-agent.exe"
+      ]
     },
     "mac": {
       "identity": null,

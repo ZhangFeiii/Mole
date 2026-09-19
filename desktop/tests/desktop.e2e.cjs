@@ -4,7 +4,7 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 
-let app, page, root;
+let app, page, root, profile;
 const fixtureFiles = new Map([
   ["项目资料/design-assets.bin", 7 * 1024 * 1024],
   ["项目资料/source-notes.md", 1 * 1024 * 1024],
@@ -33,7 +33,7 @@ test.beforeAll(async () => {
     await fs.writeFile(filename, Buffer.alloc(size, 0x4d));
   }
   hashes = await snapshot();
-  const profile = await fs.realpath(
+  profile = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "mole-e2e-profile-")),
   );
   app = await electron.launch({
@@ -51,6 +51,13 @@ test.beforeAll(async () => {
   });
   page = await app.firstWindow();
   await page.waitForLoadState("domcontentloaded");
+  await expect(
+    page.getByRole("heading", { name: "让空间回到你手中。" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "主导航" }).getByRole("button"),
+  ).toHaveCount(5);
+  await page.getByRole("button", { name: "打开概览", exact: true }).click();
   // Exercise the real main-process directory authorization path, including in
   // packaged builds. Only the native picker response is supplied by the test.
   await app.evaluate(({ dialog }, selected) => {
@@ -62,7 +69,7 @@ test.beforeAll(async () => {
   await page
     .getByRole("button", { name: "选择其他文件夹", exact: true })
     .click();
-  await page.getByRole("button", { name: "概览", exact: true }).click();
+  await page.getByRole("button", { name: "打开概览", exact: true }).click();
 });
 test.afterAll(async () => {
   await app?.close();
@@ -194,14 +201,18 @@ test("maintenance pages preview real capabilities and cancelling never executes"
       expect(rejected).toBe(true);
     } else {
       await page.getByRole("button", { name: preview, exact: true }).click();
-      await expect(page.getByText(/预览清单 ·/)).toBeVisible({
+      await expect(
+        page.locator(".maintenance-page:visible").getByText(/预览清单 ·/),
+      ).toBeVisible({
         timeout: 90000,
       });
       await expect(page.locator('input[type="checkbox"]:checked')).toHaveCount(
         0,
       );
       if (kind === "applications") {
-        const row = page.locator(".maintenance-item").first();
+        const row = page
+          .locator(".maintenance-page:visible .maintenance-item")
+          .first();
         const publisher = row.locator("div > small").first();
         if (await publisher.count()) {
           const nameBox = await row.locator("strong").boundingBox();
@@ -313,4 +324,97 @@ test("Windows recycle bin receives only a dedicated disposable cache fixture", a
   expect(await fs.readFile(protectedFile, "utf8")).toBe(
     "preserve this fixture document",
   );
+});
+
+test("analysis recycles only the explicitly selected fixture through the real main IPC", async () => {
+  test.skip(
+    process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true",
+    "Disposable write test is Windows CI only",
+  );
+  const directory = await fs.realpath(
+    await fs.mkdtemp(path.join(os.homedir(), "mole-analysis-fixture-")),
+  );
+  const selectedFile = path.join(directory, "selected-note.txt"),
+    kept = path.join(directory, "keep-note.txt");
+  await fs.writeFile(selectedFile, "selected fixture");
+  await fs.writeFile(kept, "keep fixture");
+  await app.evaluate(({ dialog }, selected) => {
+    dialog.showOpenDialog = async () => ({
+      canceled: false,
+      filePaths: [selected],
+    });
+    dialog.showMessageBox = async () => ({
+      response: 1,
+      checkboxChecked: false,
+    });
+  }, directory);
+  await page.getByRole("button", { name: "磁盘分析", exact: true }).click();
+  await page.getByRole("button", { name: "选择文件夹", exact: true }).click();
+  await page.getByRole("button", { name: "开始扫描", exact: true }).click();
+  await expect(page.getByTestId("scan-files")).toHaveText("2");
+  await expect(
+    page.getByRole("button", { name: "回收 selected-note.txt" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "回收 selected-note.txt" }).click();
+  await expect(page.getByTestId("scan-files")).toHaveText("1");
+  await expect(fs.stat(selectedFile)).rejects.toThrow();
+  expect(await fs.readFile(kept, "utf8")).toBe("keep fixture");
+  const journal = await page.evaluate(() => window.mole.maintenanceState());
+  expect(journal.recovery.required).toBe(false);
+  expect(journal.recovery.history[0].kind).toBe("files");
+  expect(await snapshot()).toEqual(hashes);
+});
+
+test("a pending operation survives an app restart and requires explicit recovery", async () => {
+  test.skip(
+    process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true",
+    "Recovery IPC test is Windows CI only",
+  );
+  await app.evaluate(async ({ app }) => {
+    const load = process
+      .getBuiltinModule("node:module")
+      .createRequire(app.getAppPath() + "/package.json");
+    const path = load("node:path");
+    const { createOperationStore } = load("./electron/operation-store.cjs");
+    const journal = createOperationStore({
+      directory: path.join(app.getPath("userData"), "maintenance-journal"),
+    });
+    await journal.begin({
+      id: "e2e-interrupted-operation",
+      kind: "cleanup",
+      count: 1,
+      names: ["synthetic pending task"],
+      phase: "running",
+    });
+  });
+  await app.close();
+  app = await electron.launch({
+    args: [path.resolve(__dirname, ".."), "--user-data-dir=" + profile],
+    env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "false" },
+  });
+  page = await app.firstWindow();
+  await expect(
+    page.getByText("上次操作需要核查，写入已锁定", { exact: true }),
+  ).toBeVisible();
+  const before = await page.evaluate(() => window.mole.maintenanceState());
+  expect(before.recovery.required).toBe(true);
+  await app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async () => ({ response: 0 });
+  });
+  expect(
+    (await page.evaluate(() => window.mole.maintenanceRecover())).cancelled,
+  ).toBe(true);
+  expect(
+    (await page.evaluate(() => window.mole.maintenanceState())).recovery
+      .required,
+  ).toBe(true);
+  await app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async () => ({ response: 1 });
+  });
+  await page.evaluate(() => window.mole.maintenanceRecover());
+  expect(
+    (await page.evaluate(() => window.mole.maintenanceState())).recovery
+      .required,
+  ).toBe(false);
+  expect(await snapshot()).toEqual(hashes);
 });

@@ -11,6 +11,13 @@ const {
 
 const scriptPath = path.resolve(__dirname, "../windows/optimize.ps1");
 
+function makeDrive(driveLetter) {
+  return {
+    driveLetter,
+    identity: `volume:fixture-${driveLetter[0].toUpperCase()}`,
+  };
+}
+
 function makeProbe(overrides = {}) {
   return {
     ok: true,
@@ -18,7 +25,7 @@ function makeProbe(overrides = {}) {
     isAdmin: true,
     dnsAvailable: true,
     optimizeAvailable: true,
-    drives: [{ driveLetter: "D:" }, { driveLetter: "C:" }],
+    drives: [makeDrive("D:"), makeDrive("C:")],
     ...overrides,
   };
 }
@@ -36,8 +43,9 @@ function makeMockRunner({ probe = makeProbe(), onCall } = {}) {
         ok: true,
         operation: request.operation,
         message: "磁盘优化完成",
-        drives: request.driveLetters.map((driveLetter) => ({
-          driveLetter,
+        drives: request.driveLetters.map((drive) => ({
+          driveLetter: drive.driveLetter,
+          identity: drive.identity,
           status: "completed",
         })),
       };
@@ -182,6 +190,23 @@ test("disabled preview items stay disabled even if the environment later becomes
   );
 });
 
+test("disk optimization is disabled when the native probe lacks a volume identity", async () => {
+  const mock = makeMockRunner({
+    probe: makeProbe({ drives: [{ driveLetter: "C:" }] }),
+  });
+  const service = createOptimizeService({
+    platform: "win32",
+    runPowerShell: mock.runPowerShell,
+  });
+  const plan = await service.preview();
+  const diskItem = plan.items.find((item) => item.id === OPERATIONS.DISKS);
+  assert.equal(diskItem.enabled, false);
+  assert.match(diskItem.reason, /磁盘|卷|标识|本地/);
+  const result = await service.execute(plan.id, [OPERATIONS.DISKS]);
+  assert.equal(result.results[0].status, "unsupported");
+  assert.equal(mock.calls.length, 1);
+});
+
 test("a failed preview probe is fail-closed and cannot be revived by later readings", async () => {
   let probes = 0;
   const mock = makeMockRunner({
@@ -206,6 +231,25 @@ test("a failed preview probe is fail-closed and cannot be revived by later readi
   assert.equal(mock.calls.length, 1);
 });
 
+test("a malformed preview probe is fail-closed", async () => {
+  const mock = makeMockRunner({
+    onCall: ({ request }) => {
+      if (request.operation === NATIVE_OPERATIONS.PROBE)
+        return { drives: [makeDrive("C:")], isAdmin: true };
+      throw new Error("malformed probe must not reach maintenance");
+    },
+  });
+  const service = createOptimizeService({
+    platform: "win32",
+    runPowerShell: mock.runPowerShell,
+  });
+  const plan = await service.preview();
+  const result = await service.execute(plan.id, [OPERATIONS.DNS]);
+  assert.equal(result.results[0].status, "failed");
+  assert.match(result.results[0].message, /安全检查失败/);
+  assert.equal(mock.calls.length, 1);
+});
+
 test("disk execution intersects with the frozen preview targets and reports changes", async () => {
   let probes = 0;
   const mock = makeMockRunner({
@@ -215,8 +259,8 @@ test("disk execution intersects with the frozen preview targets and reports chan
         return makeProbe({
           drives:
             probes === 1
-              ? [{ driveLetter: "C:" }, { driveLetter: "D:" }]
-              : [{ driveLetter: "C:" }, { driveLetter: "E:" }],
+              ? [makeDrive("C:"), makeDrive("D:")]
+              : [makeDrive("C:"), makeDrive("E:")],
         });
       }
       if (request.operation === NATIVE_OPERATIONS.DISKS)
@@ -243,7 +287,42 @@ test("disk execution intersects with the frozen preview targets and reports chan
   const diskCall = mock.calls.find(
     ({ request }) => request.operation === NATIVE_OPERATIONS.DISKS,
   );
-  assert.deepEqual(diskCall.request.driveLetters, ["C:"]);
+  assert.deepEqual(
+    diskCall.request.driveLetters.map((drive) => drive.driveLetter),
+    ["C:"],
+  );
+});
+
+test("a same-letter volume replacement is rejected by identity", async () => {
+  let probes = 0;
+  const mock = makeMockRunner({
+    onCall: ({ request }) => {
+      if (request.operation === NATIVE_OPERATIONS.PROBE) {
+        probes += 1;
+        return makeProbe({
+          drives: [
+            {
+              driveLetter: "C:",
+              identity: probes === 1 ? "volume:original" : "volume:replacement",
+            },
+          ],
+        });
+      }
+      throw new Error("volume replacement must not reach native optimization");
+    },
+  });
+  const service = createOptimizeService({
+    platform: "win32",
+    runPowerShell: mock.runPowerShell,
+  });
+  const plan = await service.preview();
+  const result = await service.execute(plan.id, [OPERATIONS.DISKS]);
+  assert.equal(result.results[0].status, "unsupported");
+  assert.match(result.results[0].message, /已变化|重新预览/);
+  assert.deepEqual(
+    mock.calls.map(({ request }) => request.operation),
+    [NATIVE_OPERATIONS.PROBE, NATIVE_OPERATIONS.PROBE],
+  );
 });
 
 test("unsupported capabilities and native failures are reported distinctly", async () => {
@@ -344,6 +423,8 @@ test("PowerShell maintenance script has a fixed operation surface", async () => 
   assert.match(source, /Clear-DnsClientCache/);
   assert.match(source, /Optimize-Volume/);
   assert.match(source, /Get-CimInstance/);
+  assert.match(source, /VolumeSerialNumber/);
+  assert.match(source, /identity/);
   assert.doesNotMatch(source, /Invoke-Expression/i);
   assert.doesNotMatch(source, /Start-Process/i);
   assert.doesNotMatch(source, /Remove-Item/i);
@@ -402,6 +483,77 @@ test("an unknown first operation stops the remaining selected maintenance", asyn
   assert.equal(operations.includes("optimize-disks"), false);
 });
 
+test("execution progress and cancellation stop only operations not yet started", async () => {
+  const controller = new AbortController();
+  const progress = [];
+  const calls = [];
+  const mock = makeMockRunner({
+    onCall: ({ request }) => {
+      calls.push(request.operation);
+      if (request.operation === NATIVE_OPERATIONS.PROBE) return makeProbe();
+      if (request.operation === NATIVE_OPERATIONS.DNS) {
+        controller.abort();
+        return {
+          ok: true,
+          operation: request.operation,
+          message: "DNS 已刷新",
+        };
+      }
+      throw new Error("cancelled operation must not start");
+    },
+  });
+  const service = createOptimizeService({
+    platform: "win32",
+    runPowerShell: mock.runPowerShell,
+  });
+  const plan = await service.preview();
+  const result = await service.execute(
+    plan.id,
+    [OPERATIONS.DNS, OPERATIONS.DISKS],
+    {
+      signal: controller.signal,
+      onProgress: (event) => progress.push(event),
+    },
+  );
+  assert.deepEqual(calls, [
+    NATIVE_OPERATIONS.PROBE,
+    NATIVE_OPERATIONS.PROBE,
+    NATIVE_OPERATIONS.DNS,
+  ]);
+  assert.deepEqual(
+    result.results.map(({ id, status }) => ({ id, status })),
+    [
+      { id: OPERATIONS.DNS, status: "completed" },
+      { id: OPERATIONS.DISKS, status: "cancelled" },
+    ],
+  );
+  assert.deepEqual(
+    progress.map(({ completed, total }) => ({ completed, total })),
+    [
+      { completed: 1, total: 2 },
+      { completed: 2, total: 2 },
+    ],
+  );
+});
+
+test("aborted preview does not invoke a native probe", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let called = false;
+  const service = createOptimizeService({
+    platform: "win32",
+    runPowerShell: async () => {
+      called = true;
+      throw new Error("must not probe after cancellation");
+    },
+  });
+  await assert.rejects(
+    service.preview({ signal: controller.signal }),
+    /预览已取消/,
+  );
+  assert.equal(called, false);
+});
+
 test(
   "Windows PowerShell 5.1 parser accepts optimize.ps1",
   { skip: process.platform !== "win32" },
@@ -413,6 +565,26 @@ test(
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
       "",
       { MOLE_OPTIMIZE_SCRIPT: scriptPath },
+    );
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+  },
+);
+test(
+  "Windows volume identity rejects cloned serial aliases",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const result = await runProcess(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        path.join(__dirname, "fixtures/optimize-volume-identity.ps1"),
+      ],
+      "",
     );
     assert.equal(result.code, 0, result.stderr || result.stdout);
   },

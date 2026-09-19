@@ -21,7 +21,8 @@ export type IconName =
   | "lock"
   | "spark"
   | "download"
-  | "upload";
+  | "upload"
+  | "trash";
 const paths: Record<IconName, string[]> = {
   grid: ["M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"],
   disk: ["M5 3h14l3 13v5H2v-5L5 3Z M2 16h20 M6 19h.01 M10 19h.01"],
@@ -51,6 +52,7 @@ const paths: Record<IconName, string[]> = {
   spark: ["m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3 3-7Z"],
   download: ["M12 3v13 m-5-5 5 5 5-5 M4 17v4h16v-4"],
   upload: ["M12 17V4 m-5 5 5-5 5 5 M4 17v4h16v-4"],
+  trash: ["M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7"],
 };
 export function Icon({
   name,

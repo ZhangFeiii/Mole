@@ -2,6 +2,10 @@ import type {
   MaintenanceKind,
   MaintenancePlan,
   MaintenanceResult,
+  MaintenanceWorkspace,
+  MaintenanceProgress,
+  RecoveryState,
+  ProtectedItem,
 } from "./maintenanceTypes";
 
 export interface Entry {
@@ -10,6 +14,8 @@ export interface Entry {
   size: number;
   directory: boolean;
   modified: string;
+  entryId?: string;
+  trashable?: boolean;
 }
 export interface ScanResult {
   root: string;
@@ -48,6 +54,39 @@ export interface Metrics {
   networkReceived: number | null;
   volumes: Volume[];
   warnings: string[];
+  processes?: {
+    topCpu: ProcessMetric[];
+    topMemory: ProcessMetric[];
+  };
+  diskIO?: {
+    name: string;
+    readBytes: number | null;
+    writeBytes: number | null;
+    readCount?: number | null;
+    writeCount?: number | null;
+    readBytesPerSecond?: number | null;
+    writeBytesPerSecond?: number | null;
+  }[];
+  battery?: {
+    percent: number | null;
+    charging: boolean | null;
+    timeRemainingSeconds: number | null;
+    source?: string;
+  } | null;
+  gpu?: {
+    name: string | null;
+    vendor?: string | null;
+    memoryBytes: number | null;
+    utilizationPercent: number | null;
+    source?: string;
+  }[];
+}
+export interface ProcessMetric {
+  pid: number;
+  name: string | null;
+  cpuPercent: number | null;
+  memoryBytes: number | null;
+  status?: string | null;
 }
 export interface Bootstrap {
   home: string;
@@ -63,12 +102,32 @@ export interface MoleBridge {
   scan(root: string, id: string): Promise<ScanResult | { cancelled: true }>;
   cancel(id: string): Promise<void>;
   reveal(path: string): Promise<void>;
-  maintenancePreview(kind: MaintenanceKind): Promise<MaintenancePlan>;
+  trashAnalysisEntry(entryId: string): Promise<MaintenanceResult>;
+  maintenancePreview(
+    kind: MaintenanceKind,
+    options?: { cursor?: string; selectionIds?: string[] },
+  ): Promise<MaintenancePlan | { cancelled: true }>;
   maintenanceExecute(
     kind: MaintenanceKind,
     planId: string,
     selectedIds: string[],
   ): Promise<MaintenanceResult>;
+  maintenanceWorkspace(kind: MaintenanceKind): Promise<MaintenanceWorkspace>;
+  maintenanceState(): Promise<{
+    recovery: RecoveryState;
+    operation: MaintenanceProgress | null;
+  }>;
+  maintenanceCancel(kind?: MaintenanceKind): Promise<boolean>;
+  maintenanceRecover(): Promise<RecoveryState>;
+  protect(planId: string, itemId: string): Promise<unknown>;
+  protectedItems(): Promise<ProtectedItem[]>;
+  unprotect(id: string): Promise<{ removed?: boolean; cancelled?: boolean }>;
+  systemPage(
+    page: "storage" | "applications" | "startup" | "updates",
+  ): Promise<void>;
+  onMaintenanceProgress(
+    callback: (event: MaintenanceProgress) => void,
+  ): () => void;
   onProgress(
     callback: (event: { id: string; data: ScanResult }) => void,
   ): () => void;

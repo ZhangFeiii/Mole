@@ -40,18 +40,39 @@ function Get-AdministratorState {
     }
 }
 
+function Get-VolumeIdentity {
+    param([string]$DeviceId, [string]$Serial)
+    # A filesystem serial alone can be cloned. Bind the mount-manager volume
+    # GUID as well so another volume at the same letter is not silently used.
+    if ($DeviceId.Length -ne 49 -or -not $DeviceId.StartsWith('\\?\Volume{', [StringComparison]::OrdinalIgnoreCase) -or -not $DeviceId.EndsWith('}\') -or $Serial -notmatch '^[0-9A-Fa-f]{8}$') { return $null }
+    $guid = [Guid]::Empty
+    if (-not [Guid]::TryParse($DeviceId.Substring(11, 36), [ref]$guid) -or $guid -eq [Guid]::Empty) { return $null }
+    return 'volume:' + $guid.ToString('D') + ':' + $Serial.ToUpperInvariant()
+}
+
 function Get-FixedLocalDrives {
     # DriveType 3 is a fixed local disk. It excludes removable, optical and
     # network drives; no caller-provided path or wildcard reaches this query.
     $volumes = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType = 3" -ErrorAction Stop)
+    $volumeIds = @{}
+    try {
+        foreach ($nativeVolume in @(Get-CimInstance -ClassName Win32_Volume -Filter "DriveType = 3" -ErrorAction Stop)) {
+            $letter = ([string]$nativeVolume.DriveLetter).ToUpperInvariant()
+            if ($letter -match '^[A-Z]:$') { $volumeIds[$letter] = [string]$nativeVolume.DeviceID }
+        }
+    } catch { }
     $drives = @()
     foreach ($volume in $volumes) {
         $deviceId = [string]$volume.DeviceID
         if ($deviceId -notmatch "^[A-Za-z]:$") {
             continue
         }
+        $volumeSerial = [string]$volume.VolumeSerialNumber
+        $identity = Get-VolumeIdentity -DeviceId ([string]$volumeIds[$deviceId.ToUpperInvariant()]) -Serial $volumeSerial
         $drives += [pscustomobject][ordered]@{
             driveLetter = $deviceId.Substring(0, 1).ToUpperInvariant() + ":"
+            identity = $identity
+            volumeSerialNumber = if ($identity) { $volumeSerial.ToUpperInvariant() } else { $null }
             volumeName = [string]$volume.VolumeName
             fileSystem = [string]$volume.FileSystem
             sizeBytes = if ($null -eq $volume.Size) { $null } else { [Int64]$volume.Size }
@@ -112,13 +133,23 @@ function Get-RequestedDriveLetters {
     }
     $letters = @()
     foreach ($valueItem in @($Value)) {
-        $letter = [string]$valueItem
+        if ($valueItem -is [string] -or $null -eq $valueItem) {
+            throw "driveLetters 必须包含卷身份"
+        }
+        $letter = [string]$valueItem.driveLetter
+        $identity = [string]$valueItem.identity
         if ($letter -notmatch "^[A-Za-z]:$") {
             throw "driveLetters 含有无效驱动器"
         }
-        $letters += $letter.Substring(0, 1).ToUpperInvariant() + ":"
+        if ($identity -notmatch "^volume:[A-Za-z0-9._:-]{1,128}$") {
+            throw "driveLetters 含有无效卷身份"
+        }
+        $letters += [pscustomobject][ordered]@{
+            driveLetter = $letter.Substring(0, 1).ToUpperInvariant() + ":"
+            identity = $identity.ToUpperInvariant()
+        }
     }
-    return @($letters | Sort-Object -Unique)
+    return @($letters | Sort-Object -Property identity -Unique)
 }
 
 function Invoke-DiskOptimization {
@@ -148,10 +179,12 @@ function Invoke-DiskOptimization {
     $current = @(Get-FixedLocalDrives)
     $allowed = @{}
     foreach ($drive in $current) {
-        $allowed[[string]$drive.driveLetter] = $true
+        if ($null -ne $drive.identity) {
+            $allowed[[string]$drive.identity] = $drive
+        }
     }
-    $targets = @($requested | Where-Object { $allowed.ContainsKey([string]$_) })
-    $rejected = @($requested | Where-Object { -not $allowed.ContainsKey([string]$_) })
+    $targets = @($requested | Where-Object { $allowed.ContainsKey(([string]$_.identity).ToUpperInvariant()) })
+    $rejected = @($requested | Where-Object { -not $allowed.ContainsKey(([string]$_.identity).ToUpperInvariant()) })
     if ($targets.Count -eq 0) {
         return [pscustomobject][ordered]@{
             ok = $false
@@ -162,20 +195,23 @@ function Invoke-DiskOptimization {
     }
 
     $results = @()
-    foreach ($drive in $targets) {
+    foreach ($requestedDrive in $targets) {
+        $drive = $allowed[([string]$requestedDrive.identity).ToUpperInvariant()]
         try {
             # With no mode switch Windows chooses its documented default:
             # TRIM for supported SSDs and analysis/defrag for HDDs.
             Optimize-Volume -DriveLetter ([char]$drive.Substring(0, 1)) -ErrorAction Stop | Out-Null
             $results += [pscustomobject][ordered]@{
-                driveLetter = $drive
+                driveLetter = [string]$drive.driveLetter
+                identity = [string]$drive.identity
                 status = "completed"
                 message = "Windows 默认磁盘优化已完成"
             }
         }
         catch {
             $results += [pscustomobject][ordered]@{
-                driveLetter = $drive
+                driveLetter = [string]$drive.driveLetter
+                identity = [string]$drive.identity
                 status = "failed"
                 message = [string]$_.Exception.Message
             }
@@ -183,7 +219,8 @@ function Invoke-DiskOptimization {
     }
     foreach ($drive in $rejected) {
         $results += [pscustomobject][ordered]@{
-            driveLetter = $drive
+            driveLetter = [string]$drive.driveLetter
+            identity = [string]$drive.identity
             status = "unsupported"
             message = "驱动器不再是固定本地磁盘，已跳过"
         }

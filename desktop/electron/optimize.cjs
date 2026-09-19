@@ -47,33 +47,58 @@ function cleanMessage(value, fallback) {
 }
 
 function normalizeDrive(drive) {
+  let value;
+  let identity;
   if (typeof drive === "string") {
-    const match = /^([a-z]):?$/i.exec(drive.trim());
-    return match ? `${match[1].toUpperCase()}:` : null;
+    value = drive;
+  } else if (drive && typeof drive === "object") {
+    value = drive.driveLetter ?? drive.letter ?? drive.deviceId;
+    identity = drive.identity ?? drive.volumeIdentity;
+    if (typeof identity !== "string" || !identity.trim()) {
+      const serial = drive.volumeSerialNumber ?? drive.volumeSerial;
+      if (typeof serial === "string" && serial.trim())
+        identity = `volume:${serial.trim().toUpperCase()}`;
+    }
+  } else {
+    return null;
   }
-  if (!drive || typeof drive !== "object") return null;
-  const value = drive.driveLetter ?? drive.letter ?? drive.deviceId;
-  return normalizeDrive(value);
+  const match = /^([a-z]):?$/i.exec(String(value).trim());
+  if (!match || typeof identity !== "string" || !identity.trim()) return null;
+  const normalizedIdentity = identity.trim();
+  if (!/^volume:[A-Za-z0-9._:-]{1,128}$/i.test(normalizedIdentity)) return null;
+  return {
+    driveLetter: `${match[1].toUpperCase()}:`,
+    identity: normalizedIdentity,
+  };
 }
 
 function normalizeDrives(value) {
-  if (!Array.isArray(value)) return [];
+  const values = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? [value]
+      : [];
   const seen = new Set();
   const drives = [];
-  for (const drive of value) {
+  for (const drive of values) {
     const normalized = normalizeDrive(drive);
-    if (normalized && !seen.has(normalized)) {
-      seen.add(normalized);
+    if (normalized && !seen.has(normalized.identity)) {
+      seen.add(normalized.identity);
       drives.push(normalized);
     }
   }
-  return drives.sort();
+  return drives.sort((left, right) =>
+    left.driveLetter.localeCompare(right.driveLetter),
+  );
 }
 
 function normalizeProbe(value) {
   const result = parseNativeResult(value);
   return {
-    ok: result.ok !== false,
+    // A probe is a security precondition. Treat missing or non-boolean
+    // success markers as failed rather than assuming an untrusted response
+    // is safe to use for maintenance.
+    ok: result.ok === true,
     isAdmin: result.isAdmin === true,
     dnsAvailable: result.dnsAvailable === true || result.hasDnsCommand === true,
     optimizeAvailable:
@@ -188,7 +213,13 @@ function createOptimizeService({
       expiresAt: new Date(plan.expiresAtMs).toISOString(),
       items: plan.items.map((item) => ({
         ...item,
-        ...(Array.isArray(item.targets) ? { targets: [...item.targets] } : {}),
+        ...(Array.isArray(item.targets)
+          ? {
+              targets: item.targets.map((target) =>
+                typeof target === "string" ? target : target.driveLetter,
+              ),
+            }
+          : {}),
       })),
       warnings: [...warnings],
     };
@@ -211,7 +242,9 @@ function createOptimizeService({
             ? "需要以管理员权限运行应用；不会自动提权"
             : undefined;
     const diskTargets =
-      probe.drives.length > 0 ? probe.drives.join(", ") : "无";
+      probe.drives.length > 0
+        ? probe.drives.map((drive) => drive.driveLetter).join(", ")
+        : "无";
     return [
       makeItem(OPERATIONS.DNS, {
         enabled: !dnsReason,
@@ -231,7 +264,9 @@ function createOptimizeService({
     ];
   }
 
-  async function preview() {
+  async function preview(options = {}) {
+    const signal = options?.signal;
+    if (signal?.aborted) throw new Error("维护预览已取消");
     const now = Date.now();
     removeExpired(now);
     if (platform !== "win32")
@@ -243,8 +278,10 @@ function createOptimizeService({
       probe = normalizeProbe(
         await callNative(NATIVE_OPERATIONS.PROBE, {}, PROBE_TIMEOUT_MS),
       );
+      if (signal?.aborted) throw new Error("维护预览已取消");
       if (!probe.ok) warnings.push(probe.message);
     } catch (error) {
+      if (signal?.aborted) throw new Error("维护预览已取消");
       probe = {
         ok: false,
         isAdmin: false,
@@ -290,7 +327,20 @@ function createOptimizeService({
     );
   }
 
-  async function execute(planId, selectedIds) {
+  async function execute(planId, selectedIds, options = {}) {
+    const signal = options?.signal;
+    const onProgress =
+      typeof options?.onProgress === "function"
+        ? options.onProgress
+        : undefined;
+    const reportProgress = (completed, total, currentName) => {
+      if (!onProgress) return;
+      try {
+        onProgress({ completed, total, currentName });
+      } catch {
+        // Progress reporting is advisory and must not change maintenance safety.
+      }
+    };
     const now = Date.now();
     removeExpired(now);
     if (typeof planId !== "string" || !plans.has(planId))
@@ -312,11 +362,34 @@ function createOptimizeService({
     });
     plans.delete(planId);
     const results = [];
+    const total = selectedItems.length;
+    const pushResult = (result) => {
+      results.push(result);
+      reportProgress(results.length, total, result.name || "维护操作");
+    };
+    const appendCancelled = (startIndex) => {
+      for (let index = startIndex; index < selectedItems.length; index++) {
+        const item = selectedItems[index];
+        pushResult(
+          createResult(
+            item.id,
+            item.name,
+            "cancelled",
+            "用户取消，未启动此项维护操作",
+          ),
+        );
+      }
+    };
+
+    if (signal?.aborted) {
+      appendCancelled(0);
+      return { planId, results, warnings: ["维护已取消"] };
+    }
 
     if (platform !== "win32") {
       for (const id of selected) {
         const item = plan.items.find((candidate) => candidate.id === id);
-        results.push(
+        pushResult(
           createResult(
             id,
             item?.name || "未知操作",
@@ -336,7 +409,7 @@ function createOptimizeService({
         plan.probe?.message || "无法确认 Windows 维护能力"
       }；请重新预览`;
       for (const item of selectedItems)
-        results.push(createResult(item.id, item.name, "failed", message));
+        pushResult(createResult(item.id, item.name, "failed", message));
       return {
         planId,
         results,
@@ -353,7 +426,7 @@ function createOptimizeService({
             /权限|管理员|administrator/i.test(item.reason || "")
               ? "permission-denied"
               : "unsupported";
-          results.push(
+          pushResult(
             createResult(
               item.id,
               item.name,
@@ -362,7 +435,7 @@ function createOptimizeService({
             ),
           );
         } else {
-          results.push(
+          pushResult(
             createResult(
               item.id,
               item.name,
@@ -386,15 +459,9 @@ function createOptimizeService({
       );
     } catch (error) {
       const failure = classifyFailure(error, "无法重新检查安全条件");
-      for (const id of selected) {
-        const item = plan.items.find((candidate) => candidate.id === id);
-        results.push(
-          createResult(
-            id,
-            item?.name || "未知操作",
-            failure.status,
-            failure.message,
-          ),
+      for (const item of selectedItems) {
+        pushResult(
+          createResult(item.id, item.name, failure.status, failure.message),
         );
       }
       return {
@@ -406,7 +473,7 @@ function createOptimizeService({
     if (probe.ok !== true) {
       const message = `无法确认当前 Windows 维护能力：${probe.message}；未执行任何维护操作`;
       for (const item of selectedItems)
-        results.push(createResult(item.id, item.name, "failed", message));
+        pushResult(createResult(item.id, item.name, "failed", message));
       return {
         planId,
         results,
@@ -414,10 +481,12 @@ function createOptimizeService({
       };
     }
 
-    for (const id of selected) {
-      const item = plan.items.find((candidate) => candidate.id === id);
-      if (results.some((result) => result.status === "unknown")) {
-        results.push(
+    let outcomeUnknown = false;
+    for (let index = 0; index < selected.length; index++) {
+      const id = selected[index];
+      const item = selectedItems[index];
+      if (outcomeUnknown) {
+        pushResult(
           createResult(
             id,
             item?.name || "维护操作",
@@ -427,15 +496,13 @@ function createOptimizeService({
         );
         continue;
       }
-      if (!item) {
-        results.push(
-          createResult(id, "未知操作", "unsupported", "操作不在此预览计划中"),
-        );
-        continue;
+      if (signal?.aborted) {
+        appendCancelled(index);
+        break;
       }
       if (id === OPERATIONS.DNS) {
         if (!probe.dnsAvailable) {
-          results.push(
+          pushResult(
             createResult(
               id,
               item.name,
@@ -452,21 +519,23 @@ function createOptimizeService({
             DNS_TIMEOUT_MS,
           );
           const status = statusFromNative(native, "DNS 缓存刷新完成");
-          results.push(
+          pushResult(
             createResult(id, item.name, status.status, status.message),
           );
+          outcomeUnknown = status.status === "unknown";
         } catch (error) {
           const failure = classifyFailure(error, "刷新 DNS 缓存失败");
-          results.push(
+          pushResult(
             createResult(id, item.name, failure.status, failure.message),
           );
+          outcomeUnknown = failure.status === "unknown";
         }
         continue;
       }
 
       if (id === OPERATIONS.DISKS) {
         if (!probe.optimizeAvailable || probe.drives.length === 0) {
-          results.push(
+          pushResult(
             createResult(
               id,
               item.name,
@@ -477,7 +546,7 @@ function createOptimizeService({
           continue;
         }
         if (!probe.isAdmin) {
-          results.push(
+          pushResult(
             createResult(
               id,
               item.name,
@@ -489,27 +558,36 @@ function createOptimizeService({
         }
         const plannedTargets = normalizeDrives(item.targets);
         const currentTargets = probe.drives;
-        const currentSet = new Set(currentTargets);
-        const plannedSet = new Set(plannedTargets);
-        const targets = plannedTargets.filter((target) =>
-          currentSet.has(target),
+        const currentByIdentity = new Map(
+          currentTargets.map((target) => [target.identity, target]),
         );
-        const skippedTargets = plannedTargets.filter(
-          (target) => !currentSet.has(target),
+        const plannedSet = new Set(
+          plannedTargets.map((target) => target.identity),
+        );
+        const targets = plannedTargets.filter((target) =>
+          currentByIdentity.has(target.identity),
         );
         const unlistedCurrentTargets = currentTargets.filter(
-          (target) => !plannedSet.has(target),
+          (target) => !plannedSet.has(target.identity),
         );
+        const skippedTargets = plannedTargets.filter(
+          (target) => !currentByIdentity.has(target.identity),
+        );
+        const targetLetters = targets.map((target) => target.driveLetter);
         if (targets.length === 0) {
-          results.push(
+          pushResult(
             createResult(
               id,
               item.name,
               "unsupported",
               "预览中的固定本地磁盘已变化，未执行任何磁盘优化；请重新预览",
               {
-                skippedTargets,
-                unlistedCurrentTargets,
+                skippedTargets: skippedTargets.map(
+                  (target) => target.driveLetter,
+                ),
+                unlistedCurrentTargets: unlistedCurrentTargets.map(
+                  (target) => target.driveLetter,
+                ),
               },
             ),
           );
@@ -524,9 +602,9 @@ function createOptimizeService({
           const status = statusFromNative(native, "本地磁盘优化完成");
           const targetWarning =
             skippedTargets.length > 0 || unlistedCurrentTargets.length > 0
-              ? `；目标已变化，仅执行预览目标与当前固定本地盘的交集（${targets.join(", ")}），跳过变化目标；请重新预览`
+              ? `；目标已变化，仅执行预览目标与当前固定本地盘的交集（${targetLetters.join(", ")}），跳过变化目标；请重新预览`
               : "";
-          results.push(
+          pushResult(
             createResult(
               id,
               item.name,
@@ -536,23 +614,35 @@ function createOptimizeService({
                 ...(Array.isArray(native?.drives)
                   ? { drives: native.drives }
                   : {}),
-                targets,
-                ...(skippedTargets.length > 0 ? { skippedTargets } : {}),
+                targets: targetLetters,
+                ...(skippedTargets.length > 0
+                  ? {
+                      skippedTargets: skippedTargets.map(
+                        (target) => target.driveLetter,
+                      ),
+                    }
+                  : {}),
                 ...(unlistedCurrentTargets.length > 0
-                  ? { unlistedCurrentTargets }
+                  ? {
+                      unlistedCurrentTargets: unlistedCurrentTargets.map(
+                        (target) => target.driveLetter,
+                      ),
+                    }
                   : {}),
               },
             ),
           );
+          outcomeUnknown = status.status === "unknown";
         } catch (error) {
           const failure = classifyFailure(error, "本地磁盘优化失败");
-          results.push(
+          pushResult(
             createResult(id, item.name, failure.status, failure.message),
           );
+          outcomeUnknown = failure.status === "unknown";
         }
         continue;
       }
-      results.push(createResult(id, item.name, "unsupported", "操作不受支持"));
+      pushResult(createResult(id, item.name, "unsupported", "操作不受支持"));
     }
 
     return { planId, results, warnings: [] };

@@ -7,9 +7,11 @@ function createPowerShellRunner({
   scriptsDirectory,
   platform = process.platform,
   spawnProcess = spawn,
-  systemRoot = process.env.SystemRoot,
+  systemRoot,
+  systemDirectory,
+  verifyAsset = async () => {},
 } = {}) {
-  return function runPowerShell(
+  return async function runPowerShell(
     scriptName,
     request,
     { timeoutMs = 60000 } = {},
@@ -18,10 +20,12 @@ function createPowerShellRunner({
       return Promise.reject(new Error("此操作仅支持 Windows"));
     if (!["applications", "optimize"].includes(scriptName))
       return Promise.reject(new Error("Unsupported maintenance script"));
+    const system =
+      systemDirectory ||
+      (systemRoot ? path.win32.join(systemRoot, "System32") : "");
     if (
-      !systemRoot ||
-      !/^[A-Za-z]:[\\/][^\r\n\0]+$/.test(systemRoot) ||
-      /^(\\\\|\/\/)/.test(systemRoot)
+      !/^[A-Za-z]:[\\/][^:\r\n\0]+$/.test(system) ||
+      /^(\\\\|\/\/)/.test(system)
     )
       return Promise.reject(new Error("Invalid Windows system directory"));
     if (
@@ -32,10 +36,10 @@ function createPowerShellRunner({
     const input = JSON.stringify(request);
     if (Buffer.byteLength(input) > 64 * 1024)
       return Promise.reject(new Error("Maintenance request is too large"));
+    await verifyAsset(scriptName);
     return new Promise((resolve, reject) => {
       const executable = path.win32.join(
-        systemRoot,
-        "System32",
+        system,
         "WindowsPowerShell",
         "v1.0",
         "powershell.exe",
@@ -51,7 +55,23 @@ function createPowerShellRunner({
           "-File",
           path.join(scriptsDirectory, `${scriptName}.ps1`),
         ],
-        { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+        {
+          shell: false,
+          windowsHide: true,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            SystemRoot: path.win32.dirname(system),
+            windir: path.win32.dirname(system),
+            ComSpec: path.win32.join(system, "cmd.exe"),
+            PSModulePath: path.win32.join(
+              system,
+              "WindowsPowerShell",
+              "v1.0",
+              "Modules",
+            ),
+          },
+        },
       );
       let stdout = "",
         stderr = "",

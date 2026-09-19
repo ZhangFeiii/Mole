@@ -59,6 +59,15 @@ func Scan(ctx context.Context, root string, opts ScanOptions) (ScanResult, error
 	if runtime.GOOS == "windows" && !localVolume(filepath.VolumeName(r.Root)+string(os.PathSeparator)) {
 		return r, errors.New("only local fixed or removable volumes can be scanned")
 	}
+	if runtime.GOOS == "windows" {
+		attributes, e := nativeAttributes(r.Root)
+		if e != nil {
+			return r, fmt.Errorf("cannot validate scan root before access: %w", e)
+		}
+		if attributes&(0x400|0x1000|0x40000|0x400000) != 0 {
+			return r, errors.New("scan root is a reparse point or cloud placeholder")
+		}
+	}
 	info, err := os.Lstat(r.Root)
 	if err != nil {
 		return r, fmt.Errorf("cannot inspect scan root: %w", err)
@@ -153,7 +162,7 @@ func Scan(ctx context.Context, root string, opts ScanOptions) (ScanResult, error
 			}
 			r.Files++
 			r.Bytes += size
-			r.LargeFiles = keepLargest(r.LargeFiles, Entry{Name: fi.Name(), Path: path, Size: size, Modified: fi.ModTime().UTC().Format(time.RFC3339)}, maxLargeFiles)
+			r.LargeFiles = keepLargest(r.LargeFiles, Entry{Name: fi.Name(), Path: path, Size: size, Modified: fi.ModTime().UTC().Format(time.RFC3339Nano)}, maxLargeFiles)
 			progress(false)
 			return size
 		}
@@ -230,7 +239,7 @@ func Scan(ctx context.Context, root string, opts ScanOptions) (ScanResult, error
 			size := walk(path, fi, 1)
 			// Skipped links and placeholders are counted as exclusions, not clickable entries.
 			if skipReason(path, fi) == "" && (fi.IsDir() || fi.Mode().IsRegular()) && sameVolume(info, fi) {
-				r.Entries = keepLargest(r.Entries, Entry{Name: child.Name(), Path: path, Size: size, Directory: fi.IsDir(), Modified: fi.ModTime().UTC().Format(time.RFC3339)}, maxEntries)
+				r.Entries = keepLargest(r.Entries, Entry{Name: child.Name(), Path: path, Size: size, Directory: fi.IsDir(), Modified: fi.ModTime().UTC().Format(time.RFC3339Nano)}, maxEntries)
 			}
 			progress(false)
 		}

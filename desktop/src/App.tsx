@@ -3,9 +3,19 @@ import type { Bootstrap, Entry, Metrics, ScanResult } from "./types";
 import { Icon, type IconName } from "./Icon";
 import { bytes, duration, percent, rates, treemap } from "./utils";
 import { Maintenance } from "./Maintenance";
-import type { MaintenanceKind } from "./maintenanceTypes";
+import { OperationPanel } from "./OperationPanel";
+import { StatusDetails } from "./StatusDetails";
+import type {
+  MaintenanceKind,
+  MaintenanceProgress,
+  RecoveryState,
+} from "./maintenanceTypes";
 
-type Page = "overview" | "analyze" | "status" | MaintenanceKind;
+type Page =
+  | "overview"
+  | "analyze"
+  | "status"
+  | Exclude<MaintenanceKind, "files">;
 type ScanState =
   | "idle"
   | "running"
@@ -112,12 +122,18 @@ function MetricCard({
 
 export function App() {
   const bridge = window.mole;
-  const [page, setPage] = useState<Page>("overview");
+  const [page, setPage] = useState<Page>("cleanup");
+  const [recordsOpen, setRecordsOpen] = useState(false);
+  const [maintenanceJob, setMaintenanceJob] =
+    useState<MaintenanceProgress | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryState>();
   const [boot, setBoot] = useState<Bootstrap>();
   const [metrics, setMetrics] = useState<Metrics>();
   const [history, setHistory] = useState<Metrics[]>([]);
   const [statusError, setStatusError] = useState("");
   const [error, setError] = useState("");
+  const [fileNotice, setFileNotice] = useState("");
+  const [fileBusy, setFileBusy] = useState(false);
   const [selected, setSelected] = useState("");
   const [scanState, setScanState] = useState<ScanState>("idle");
   const [result, setResult] = useState<ScanResult>();
@@ -130,6 +146,29 @@ export function App() {
   const job = useRef<string | null>(null);
   const latestProgress = useRef<ScanResult | undefined>(undefined);
   const busy = scanState === "running" || scanState === "cancelling";
+  useEffect(() => {
+    if (!bridge) return;
+    let live = true;
+    const refresh = () =>
+      bridge
+        .maintenanceState()
+        .then((state) => {
+          if (live) {
+            setRecovery(state.recovery);
+            setMaintenanceJob(state.operation);
+          }
+        })
+        .catch(() => {});
+    void refresh();
+    const dispose = bridge.onMaintenanceProgress((event) => {
+      setMaintenanceJob(event.phase === "idle" ? null : event);
+      if (event.phase === "idle") void refresh();
+    });
+    return () => {
+      live = false;
+      dispose();
+    };
+  }, [bridge]);
 
   useEffect(() => {
     if (!bridge) return;
@@ -257,6 +296,32 @@ export function App() {
       setError((e as Error).message);
     }
   }
+  async function trashEntry(entry: Entry) {
+    if (!bridge || !entry.entryId || busy || fileBusy) return;
+    setFileBusy(true);
+    setFileNotice("");
+    setError("");
+    try {
+      const value = await bridge.trashAnalysisEntry(entry.entryId);
+      if (value.cancelled) {
+        setFileNotice("已取消，文件没有移动。");
+        return;
+      }
+      const item = value.results[0];
+      setFileNotice(item?.message || "操作已返回，请检查结果。");
+      if (item?.status === "success" || item?.status === "recycled")
+        await scan(selected, trail);
+      if (item?.status === "unknown") {
+        setRecordsOpen(true);
+        const state = await bridge.maintenanceState();
+        setRecovery(state.recovery);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setFileBusy(false);
+    }
+  }
   function drill(entry: Entry) {
     if (entry.directory && !busy) void scan(entry.path, [...trail, selected]);
   }
@@ -289,7 +354,7 @@ export function App() {
       sort === "name"
         ? a.name.localeCompare(b.name, "zh-CN")
         : sort === "modified"
-          ? b.modified.localeCompare(a.modified)
+          ? Date.parse(b.modified) - Date.parse(a.modified)
           : b.size - a.size,
     );
   const skipped = result
@@ -304,7 +369,11 @@ export function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
+        <button
+          className="brand brand-home"
+          aria-label="打开概览"
+          onClick={() => setPage("overview")}
+        >
           <div className="brand-mark">
             <span />
             <i />
@@ -315,25 +384,54 @@ export function App() {
             </strong>
             <small>DESKTOP</small>
           </div>
-        </div>
+        </button>
         <div className="workspace-label">
           你的电脑 <span>01</span>
         </div>
         <nav aria-label="主导航">
           {(
             [
-              ["overview", "grid"],
-              ["analyze", "disk"],
-              ["status", "activity"],
               ["cleanup", "spark"],
               ["applications", "grid"],
               ["optimize", "cpu"],
+              ["analyze", "disk"],
+              ["status", "activity"],
             ] as [Page, IconName][]
           ).map(([id, icon]) => (
             <button
               key={id}
               className={`nav-item ${page === id ? "active" : ""}`}
               onClick={() => setPage(id)}
+              onKeyDown={(event) => {
+                const sequence: Page[] = [
+                  "cleanup",
+                  "applications",
+                  "optimize",
+                  "analyze",
+                  "status",
+                ];
+                if (
+                  !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
+                    event.key,
+                  )
+                )
+                  return;
+                event.preventDefault();
+                const next =
+                  sequence[
+                    (sequence.indexOf(id) +
+                      (event.key === "ArrowDown" || event.key === "ArrowRight"
+                        ? 1
+                        : 4)) %
+                      5
+                  ];
+                setPage(next);
+                const buttons =
+                  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                    ".nav-item",
+                  );
+                buttons?.[sequence.indexOf(next)]?.focus();
+              }}
               aria-current={page === id ? "page" : undefined}
             >
               <Icon name={icon} />
@@ -343,6 +441,14 @@ export function App() {
           ))}
         </nav>
         <div className="sidebar-divider" />
+        <button
+          className="nav-item records-button"
+          onClick={() => setRecordsOpen(true)}
+        >
+          <Icon name="refresh" />
+          <span>操作记录与恢复</span>
+          {recovery?.required && <span className="recovery-dot" />}
+        </button>
         <div className="sidebar-bottom">
           <div className="safety-note">
             <Icon name="shield" size={22} />
@@ -355,7 +461,7 @@ export function App() {
           </div>
           <div className="build-label">
             <span className="live-dot" /> {platformLabel}
-            <span>v{boot?.version ?? "0.1.0"}</span>
+            <span>v{boot?.version ?? "0.3.0"}</span>
           </div>
           <div className="fork-label">独立社区界面 · 非官方 GUI</div>
         </div>
@@ -377,15 +483,53 @@ export function App() {
           </div>
         </header>
         <div className="page-content">
-          {(page === "cleanup" ||
-            page === "applications" ||
-            page === "optimize") && (
-            <Maintenance
-              key={page}
-              kind={page}
-              supported={boot?.maintenance === true}
-            />
+          {recovery?.required && (
+            <div className="notice warning">
+              <div>
+                <strong>上次操作需要核查，写入已锁定</strong>
+                <p>{recovery.reason}</p>
+              </div>
+              <button
+                className="text-button"
+                onClick={() => setRecordsOpen(true)}
+              >
+                查看并恢复
+              </button>
+            </div>
           )}
+          {maintenanceJob && (
+            <div className="global-operation" role="status">
+              <span className="live-dot" />
+              <span>
+                {maintenanceJob.phase === "preview"
+                  ? "扫描中"
+                  : maintenanceJob.phase === "confirm"
+                    ? "等待确认"
+                    : "维护执行中"}
+                {maintenanceJob.currentName
+                  ? " · " + maintenanceJob.currentName
+                  : ""}
+              </span>
+              <small>切换工具不会丢失任务</small>
+              <button
+                className="text-button"
+                onClick={() =>
+                  void bridge.maintenanceCancel(maintenanceJob.kind)
+                }
+              >
+                停止后续项目
+              </button>
+            </div>
+          )}
+          {(["cleanup", "applications", "optimize"] as const).map((kind) => (
+            <div key={kind} hidden={page !== kind}>
+              <Maintenance
+                kind={kind}
+                active={page === kind}
+                supported={boot?.maintenance === true}
+              />
+            </div>
+          ))}
           {error && (
             <div role="alert" className="notice error">
               <Icon name="info" />
@@ -524,11 +668,16 @@ export function App() {
 
           {page === "analyze" && (
             <>
+              {fileNotice && (
+                <div className="notice" role="status">
+                  {fileNotice}
+                </div>
+              )}
               <div className="page-heading">
                 <div>
                   <div className="eyebrow">DISK EXPLORER</div>
                   <h1>每一份空间，都有去处。</h1>
-                  <p>按目录看占用，按大小找文件。全程只读。</p>
+                  <p>扫描只读；普通文件可单独移入回收站，每次明确确认。</p>
                 </div>
                 <button
                   className="button secondary"
@@ -816,6 +965,23 @@ export function App() {
                                 >
                                   <Icon name="external" size={15} />
                                 </button>
+                                {boot?.maintenance && !entry.directory && (
+                                  <button
+                                    className="icon-button recycle-button"
+                                    disabled={
+                                      !entry.entryId || fileBusy || busy
+                                    }
+                                    aria-label={"回收 " + entry.name}
+                                    title={
+                                      entry.entryId
+                                        ? "检查保护规则后，确认移入回收站"
+                                        : "文件状态不可确认，请重新扫描；系统/云端/使用中项目不可回收"
+                                    }
+                                    onClick={() => void trashEntry(entry)}
+                                  >
+                                    <Icon name="trash" size={15} />
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -865,7 +1031,7 @@ export function App() {
                   </p>
                   <div className="empty-assurances">
                     <span>
-                      <Icon name="shield" size={15} /> 不修改文件
+                      <Icon name="shield" size={15} /> 扫描不改动文件
                     </span>
                     <span>
                       <Icon name="lock" size={15} /> 数据不离开本机
@@ -990,6 +1156,7 @@ export function App() {
                   </div>
                 </dl>
               </section>
+              <StatusDetails metrics={metrics} />
               {metrics && metrics.warnings.length > 0 && (
                 <details className="metric-warnings">
                   <summary>
@@ -1018,6 +1185,15 @@ export function App() {
           </span>
         </footer>
       </main>
+      <OperationPanel
+        open={recordsOpen}
+        onClose={() => {
+          setRecordsOpen(false);
+          void bridge
+            .maintenanceState()
+            .then((value) => setRecovery(value.recovery));
+        }}
+      />
     </div>
   );
 }

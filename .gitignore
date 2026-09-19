@@ -97,6 +97,7 @@ desktop/node_modules/
 desktop/dist/
 desktop/release/
 desktop/resources/
+desktop/electron/generated-integrity.json
 desktop/test-results/
 desktop/playwright-report/
 .tools/

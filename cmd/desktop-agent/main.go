@@ -19,6 +19,19 @@ func run(args []string, out io.Writer) error {
 	encoder := json.NewEncoder(out)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	if len(args) == 1 && args[0] == "platform-info" {
+		info, err := desktop.ReadPlatformInfo()
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(info)
+	}
+	if len(args) == 1 && args[0] == "status-stream" {
+		return runStatusStream(ctx, out)
+	}
+	if len(args) == 1 && args[0] == "activity" {
+		return encoder.Encode(desktop.ReadActivity())
+	}
 	if len(args) == 1 && args[0] == "status" {
 		ctx, timeout := context.WithTimeout(ctx, 8*time.Second)
 		defer timeout()

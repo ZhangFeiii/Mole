@@ -31,9 +31,14 @@ async function fixture(options = {}) {
           const flags =
             attributes.get(target) ??
             (stat.isSymbolicLink() ? 0x400 : stat.isDirectory() ? 0x10 : 0x80);
-          return { path: target, attributes: flags };
+          return { path: target, attributes: flags, inUse: false };
         } catch (error) {
-          return { path: target, attributes: null, error: error.message };
+          return {
+            path: target,
+            attributes: null,
+            error: error.message,
+            code: error.code === "ENOENT" ? "notFound" : "unavailable",
+          };
         }
       }),
     );
@@ -255,7 +260,7 @@ test("native reparse/offline/recall flags and missing attributes fail closed", a
   assert.equal(f.moved.length, 0);
   const broken = await fixture({ inspectAttributes: async () => [] });
   await broken.file("old.tmp");
-  assert.equal((await broken.service.preview()).items.length, 0);
+  await assert.rejects(broken.service.preview(), /属性响应不完整/);
 });
 
 test("ancestor reparse flags block preview and changes after preview block execute", async () => {

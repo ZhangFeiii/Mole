@@ -16,6 +16,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $script:Warnings = New-Object 'System.Collections.Generic.List[string]'
+$script:RunningProcessNames = @{}
+$script:RunningProcessSnapshotReady = $false
+$script:RunningProcessSnapshotError = $false
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $script:Utf8NoBom
 $inputEncoding = $script:Utf8NoBom
@@ -128,6 +131,21 @@ function Get-ObjectPropertyText {
     return [string]$property.Value
 }
 
+function Get-ObjectPropertyValue {
+    param(
+        [AllowNull()]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($Name)) {
+        return $Object[$Name]
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
 function Test-DangerousUninstallCommand {
     param([AllowNull()][string]$Command)
 
@@ -152,23 +170,18 @@ function Resolve-TrustedExecutablePath {
 
     # Only an absolute local drive path is accepted.  UNC, device namespace,
     # drive-relative, rooted-current-drive, and reparse/cloud paths are all
-    # outside the uninstall trust boundary.
-    if ($Path -notmatch '^(?i:[a-z]):\\' -or $Path -match '^(?:\\\\|//|\\\\\?\\|\\\\\.\\)') {
-        return $null
-    }
+    # outside the uninstall trust boundary.  Get-TrustedPathBoundary walks
+    # ancestors from the drive root before it ever opens the final child; this
+    # prevents a static junction/cloud placeholder from redirecting the first
+    # lookup into a network or hydration path.
+    $boundary = Get-TrustedPathBoundary -Path $Path
+    if ($null -eq $boundary) { return $null }
     $item = $null
     try {
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $item = Get-Item -LiteralPath $boundary.Path -Force -ErrorAction Stop
         if ($item.PSIsContainer) { return $null }
         if (Test-UntrustedPathAttributes -Attributes $item.Attributes) {
             return $null
-        }
-        $current = $item.Directory
-        while ($null -ne $current) {
-            if (Test-UntrustedPathAttributes -Attributes $current.Attributes) { return $null }
-            $parent = $current.Parent
-            if ($null -eq $parent -or $parent.FullName -eq $current.FullName) { break }
-            $current = $parent
         }
         return $item.FullName
     }
@@ -186,23 +199,133 @@ function Test-UntrustedPathAttributes {
     return (([int]$Attributes -band $untrustedMask) -ne 0)
 }
 
+function Test-LocalDrivePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        $driveName = $Path.Substring(0, 1).ToUpperInvariant()
+        $root = "{0}:\" -f $driveName
+        $driveInfo = New-Object System.IO.DriveInfo($root)
+        if ($driveInfo.DriveType -eq [System.IO.DriveType]::Network -or
+            $driveInfo.DriveType -eq [System.IO.DriveType]::NoRootDirectory -or
+            $driveInfo.DriveType -eq [System.IO.DriveType]::Unknown) {
+            return $false
+        }
+        $drive = Get-PSDrive -Name $driveName -PSProvider FileSystem -ErrorAction Stop
+        $displayRoot = Get-ObjectPropertyText -Object $drive -Name "DisplayRoot"
+        if ($drive.Root -match '^(?:\\\\|//)' -or $displayRoot -match '^(?:\\\\|//)') {
+            return $false
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-LocalPathParts {
+    param([AllowNull()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        $Path -notmatch '^(?i:[a-z]):\\' -or
+        ($Path.Length -gt 2 -and $Path.Substring(2) -match ':') -or
+        $Path -match '^(?:\\\\|//|\\\\\?\\|\\\\\.\\)') {
+        return $null
+    }
+
+    $segments = New-Object 'System.Collections.Generic.List[string]'
+    $tail = $Path.Substring(3)
+    if ($tail.Length -gt 0) {
+        foreach ($segment in ($tail -split '\\')) {
+            if ([string]::IsNullOrEmpty($segment)) { continue }
+            # Reject traversal instead of asking the filesystem to normalize it
+            # before the ancestor checks have established the trust boundary.
+            if ($segment -eq "." -or $segment -eq ".." -or $segment -match ':') {
+                return $null
+            }
+            [void]$segments.Add($segment)
+        }
+    }
+    return [PSCustomObject]@{
+        Root = ("{0}:\" -f $Path.Substring(0, 1).ToUpperInvariant())
+        Segments = $segments.ToArray()
+    }
+}
+
+function Get-TrustedPathBoundary {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $parts = Get-LocalPathParts -Path $Path
+    if ($null -eq $parts -or -not (Test-LocalDrivePath -Path $Path)) { return $null }
+
+    try {
+        # The root is the first filesystem object inspected.  Every following
+        # ancestor is checked before Join-Path is allowed to name its child.
+        $current = Get-Item -LiteralPath $parts.Root -Force -ErrorAction Stop
+        if (-not $current.PSIsContainer -or (Test-UntrustedPathAttributes -Attributes $current.Attributes)) {
+            return $null
+        }
+        for ($index = 0; $index -lt ($parts.Segments.Count - 1); $index++) {
+            $candidatePath = Join-Path -Path $parts.Root -ChildPath (($parts.Segments[0..$index]) -join '\')
+            $current = Get-Item -LiteralPath $candidatePath -Force -ErrorAction Stop
+            if (-not $current.PSIsContainer -or (Test-UntrustedPathAttributes -Attributes $current.Attributes)) {
+                return $null
+            }
+        }
+        $finalPath = $parts.Root
+        if ($parts.Segments.Count -gt 0) {
+            $finalPath = Join-Path -Path $parts.Root -ChildPath ($parts.Segments -join '\')
+        }
+        return [PSCustomObject]@{ Path = $finalPath }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-FileFingerprint {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $trustedPath = Resolve-TrustedExecutablePath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($trustedPath)) { return $null }
+    $info = $null
+    $stream = $null
+    $sha = $null
+    try {
+        $info = Get-Item -LiteralPath $trustedPath -Force -ErrorAction Stop
+        # Hashing an unexpectedly large file would make a read-only preview
+        # unbounded.  Such a vendor entry is not enabled for uninstall.
+        if ($info.Length -gt 128MB) { return $null }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $stream = [System.IO.File]::OpenRead($trustedPath)
+        $hash = ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+        return [PSCustomObject]@{
+            Path = $trustedPath
+            Hash = $hash
+            Length = [Int64]$info.Length
+            LastWriteUtc = $info.LastWriteTimeUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+        }
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $sha) { $sha.Dispose() }
+    }
+}
+
 function Resolve-TrustedDirectoryPath {
     param([AllowNull()][string]$Path)
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^(?i:[a-z]):\\' -or $Path -match '^(?:\\\\|//|\\\\\?\\|\\\\\.\\)') {
-        return $null
-    }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    $boundary = Get-TrustedPathBoundary -Path $Path
+    if ($null -eq $boundary) { return $null }
     $item = $null
     try {
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $item = Get-Item -LiteralPath $boundary.Path -Force -ErrorAction Stop
         if (-not $item.PSIsContainer) { return $null }
-        $current = $item
-        while ($null -ne $current) {
-            if (Test-UntrustedPathAttributes -Attributes $current.Attributes) { return $null }
-            $parent = $current.Parent
-            if ($null -eq $parent -or $parent.FullName -eq $current.FullName) { break }
-            $current = $parent
-        }
+        if (Test-UntrustedPathAttributes -Attributes $item.Attributes) { return $null }
         return $item.FullName
     }
     catch {
@@ -222,6 +345,11 @@ function Convert-UninstallCommand {
         Executable = ""
         Arguments = ""
         Hash = $hash
+        IsMsi = $false
+        ProductCode = ""
+        ExecutableHash = ""
+        ExecutableLength = $null
+        ExecutableLastWriteUtc = ""
     }
     if ($danger) { return [PSCustomObject]$invalid }
 
@@ -299,6 +427,11 @@ function Convert-UninstallCommand {
         }
         # Do not pass the registry's raw MSI string to Start-Process.
         $arguments = "/X $productCode /norestart"
+        $fingerprint = Get-FileFingerprint -Path $executable
+        if ($null -eq $fingerprint) {
+            $invalid.Reason = "系统 MSI 执行程序指纹不可确认"
+            return [PSCustomObject]$invalid
+        }
     }
     else {
         if ($executable -notmatch '(?i)\.exe$' -or -not [System.IO.Path]::IsPathRooted($executable)) {
@@ -311,6 +444,11 @@ function Convert-UninstallCommand {
             return [PSCustomObject]$invalid
         }
         $executable = $trustedPath
+        $fingerprint = Get-FileFingerprint -Path $executable
+        if ($null -eq $fingerprint) {
+            $invalid.Reason = "官方卸载程序指纹不可确认"
+            return [PSCustomObject]$invalid
+        }
     }
 
     return [PSCustomObject]@{
@@ -319,6 +457,59 @@ function Convert-UninstallCommand {
         Executable = $executable
         Arguments = $arguments
         Hash = $hash
+        IsMsi = $isMsiExec
+        ProductCode = if ($isMsiExec) { $productCode.ToUpperInvariant() } else { "" }
+        ExecutableHash = $fingerprint.Hash
+        ExecutableLength = $fingerprint.Length
+        ExecutableLastWriteUtc = $fingerprint.LastWriteUtc
+    }
+}
+
+function Get-KnownProcessNames {
+    param([AllowNull()][string]$DisplayIcon)
+
+    $names = New-Object 'System.Collections.Generic.List[string]'
+    if ([string]::IsNullOrWhiteSpace($DisplayIcon)) { return $names.ToArray() }
+    $match = [regex]::Match($DisplayIcon.Trim(), '^\s*"(?<path>[^"]+)"')
+    if (-not $match.Success) {
+        $match = [regex]::Match($DisplayIcon.Trim(), '^\s*(?<path>[^\s,]+)')
+    }
+    if (-not $match.Success) { return $names.ToArray() }
+    $iconPath = $match.Groups["path"].Value
+    if ($iconPath -notmatch '(?i)\.exe$') { return $names.ToArray() }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($iconPath)
+    if ($leaf -match '^[A-Za-z0-9._-]{1,128}$') { [void]$names.Add($leaf) }
+    return $names.ToArray()
+}
+
+function Test-RunningProcess {
+    param([string[]]$Names)
+
+    if ($null -eq $Names -or $Names.Count -eq 0) { return $false }
+    if (-not $script:RunningProcessSnapshotReady) { Initialize-RunningProcessSnapshot }
+    if ($script:RunningProcessSnapshotError) { return $null }
+    foreach ($name in $Names) {
+        if ($script:RunningProcessNames.ContainsKey($name)) { return $true }
+    }
+    return $false
+}
+
+function Initialize-RunningProcessSnapshot {
+    if ($script:RunningProcessSnapshotReady) { return }
+    try {
+        $snapshot = @{}
+        foreach ($process in @(Get-Process -ErrorAction Stop)) {
+            $name = [string]$process.ProcessName
+            if ($name) { $snapshot[$name] = $true }
+        }
+        $script:RunningProcessNames = $snapshot
+        $script:RunningProcessSnapshotReady = $true
+    }
+    catch {
+        # Access-denied/process enumeration failures must not silently enable a
+        # possibly running application for an uninstall.
+        $script:RunningProcessSnapshotError = $true
+        $script:RunningProcessSnapshotReady = $true
     }
 }
 
@@ -330,6 +521,9 @@ function Get-ProtectionReason {
         [bool]$IsFramework = $false,
         [bool]$IsResourcePackage = $false,
         [AllowNull()][string]$SignatureKind,
+        [bool]$NonRemovable = $false,
+        [bool]$IsPartiallyStaged = $false,
+        [AllowNull()][string]$PackageStatus,
         [AllowNull()][string]$SystemComponent,
         [AllowNull()][string]$NoRemove,
         [AllowNull()][string]$ReleaseType,
@@ -337,6 +531,11 @@ function Get-ProtectionReason {
     )
 
     if ($IsFramework -or $IsResourcePackage) { return "Windows 框架或资源包受保护" }
+    if ($NonRemovable) { return "Appx 标记为不可移除" }
+    if ($IsPartiallyStaged) { return "Appx 包处于暂存状态，已停止卸载" }
+    if (-not [string]::IsNullOrWhiteSpace($PackageStatus) -and $PackageStatus -ne "Ok") {
+        return "Appx 包状态不是可安全移除状态"
+    }
     if ($SignatureKind -eq "System") { return "系统签名的 Windows 应用受保护" }
     if ($SystemComponent -match '^(?i:1|true|yes)$' -or $NoRemove -match '^(?i:1|true|yes)$') {
         return "注册表标记为系统组件或不可移除"
@@ -353,6 +552,12 @@ function Get-ProtectionReason {
     if ($Name -match '(?i)^NVIDIA(?:$|\s).*Driver|^AMD(?:$|\s).*Software|^Intel(?:$|\s).*Driver') {
         return "显卡或硬件驱动项目受保护"
     }
+    if ($Name -match '(?i)\bDriver\b') {
+        return "驱动项目受保护"
+    }
+    if ($Name -match '(?i)^(?:PowerShell|Python|Node\.js|Ruby|Perl|PHP)(?:$|\s)|^Windows Terminal(?:$|\s)|^(?:Windows Subsystem for Linux|WSL)(?:$|\s)') {
+        return "脚本解释器、终端或运行时项目受保护"
+    }
     $isDriverRelease = $ReleaseType -match '(?i)^driver$'
     $isKnownHardware = ($Publisher -match '(?i)(?:NVIDIA|AMD|Intel|Realtek|Qualcomm|Broadcom|Synaptics|Wacom)' -and $Name -match '(?i)driver|graphics|audio|chipset')
     if ($isDriverRelease -or $isKnownHardware) {
@@ -364,6 +569,9 @@ function Get-ProtectionReason {
         }
         if ($AppxName -match '(?i)^(?:Microsoft\.Windows|MicrosoftWindows\.)') {
             return "Windows 核心 Appx 项目受保护"
+        }
+        if ($AppxName -match '(?i)^(?:Microsoft\.(?:PowerShell|VCLibs|NET\.|UI\.Xaml)|PowerShell|Windows\.Terminal|Microsoft\.Windows\.Wsl)|(?:Framework|Runtime|Driver|Interpreter)') {
+            return "脚本解释器、运行时或驱动 Appx 项目受保护"
         }
     }
     return $null
@@ -405,6 +613,19 @@ function New-Win32Application {
     $description = Get-StringValue -Key $Key -Name "Comments"
     $installDate = Get-StringValue -Key $Key -Name "InstallDate"
     $estimatedKB = Get-LongValue -Key $Key -Name "EstimatedSize"
+    $registeredProductCode = Get-StringValue -Key $Key -Name "ProductCode"
+    $subKeyProductCode = ""
+    $subKeyLeaf = [System.IO.Path]::GetFileName($SubKey)
+    if ($subKeyLeaf -match '(?i)^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$') {
+        $subKeyProductCode = $subKeyLeaf.ToUpperInvariant()
+    }
+    if ([string]::IsNullOrWhiteSpace($registeredProductCode)) {
+        $registeredProductCode = $subKeyProductCode
+    }
+    if (-not [string]::IsNullOrWhiteSpace($registeredProductCode)) {
+        $registeredProductCode = $registeredProductCode.ToUpperInvariant()
+    }
+    $displayIcon = Get-StringValue -Key $Key -Name "DisplayIcon"
     $registryPath = Get-RegistryLocation -HiveName $HiveName -SubKey $SubKey
     $identity = [ordered]@{
         registryPath = $registryPath
@@ -413,7 +634,7 @@ function New-Win32Application {
         displayName = $name
         publisher = $publisher
         version = $version
-        productCode = Get-StringValue -Key $Key -Name "ProductCode"
+        productCode = $registeredProductCode
         uninstallHash = Get-TextHash -Text $uninstall
         installLocation = $installLocation
         systemComponent = Get-StringValue -Key $Key -Name "SystemComponent"
@@ -422,9 +643,25 @@ function New-Win32Application {
         parentKeyName = Get-StringValue -Key $Key -Name "ParentKeyName"
     }
     $parsed = Convert-UninstallCommand -Command $uninstall
+    $msiIdentityReason = ""
+    if ($parsed.IsMsi) {
+        if ($identity.productCode -notmatch '(?i)^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$') {
+            $msiIdentityReason = "MSI 登记项缺少可验证的 ProductCode"
+        } elseif ($subKeyProductCode -and $identity.productCode -ne $subKeyProductCode) {
+            $msiIdentityReason = "MSI ProductCode 与注册表键 GUID 不一致"
+        } elseif ($identity.productCode -ne $parsed.ProductCode.ToUpperInvariant()) {
+            $msiIdentityReason = "MSI 卸载 GUID 与登记项 ProductCode 不一致"
+        }
+    }
+    $identity.msiProductCode = $parsed.ProductCode
+    $identity.uninstallExecutableHash = $parsed.ExecutableHash
+    $identity.uninstallExecutableLength = $parsed.ExecutableLength
+    $identity.uninstallExecutableLastWriteUtc = $parsed.ExecutableLastWriteUtc
+    $knownProcessNames = @(Get-KnownProcessNames -DisplayIcon $displayIcon)
+    $running = Test-RunningProcess -Names $knownProcessNames
     $protectedReason = Get-ProtectionReason -Name $name -Publisher $publisher -SystemComponent $identity.systemComponent -NoRemove $identity.noRemove -ReleaseType $identity.releaseType -ParentKeyName $identity.parentKeyName
-    $enabled = $parsed.Valid -and [string]::IsNullOrWhiteSpace($protectedReason)
-    $reason = if ($protectedReason) { $protectedReason } elseif (-not $parsed.Valid) { $parsed.Reason } else { "" }
+    $enabled = $parsed.Valid -and [string]::IsNullOrWhiteSpace($msiIdentityReason) -and [string]::IsNullOrWhiteSpace($protectedReason) -and $running -eq $false
+    $reason = if ($protectedReason) { $protectedReason } elseif ($msiIdentityReason) { $msiIdentityReason } elseif ($null -eq $running) { "无法确认软件是否正在运行，已停止卸载" } elseif ($running) { "软件正在运行，请先退出后再卸载" } elseif (-not $parsed.Valid) { $parsed.Reason } else { "" }
     $item = [ordered]@{
         id = Get-ApplicationId -Kind "win32" -Identity ([PSCustomObject]$identity)
         kind = "win32"
@@ -437,6 +674,8 @@ function New-Win32Application {
         installDate = $installDate
         enabled = $enabled
         protected = (-not [string]::IsNullOrWhiteSpace($protectedReason))
+        running = $running
+        knownProcessNames = $knownProcessNames
         reason = $reason
         identity = $identity
         uninstall = if ($parsed.Valid) {
@@ -511,12 +750,30 @@ function New-AppxApplication {
 
     $name = [string]$Package.Name
     $displayName = $name
+    $manifest = $null
+    $knownProcessNames = @()
     try {
         $manifest = Get-AppxPackageManifest -Package $Package.PackageFullName -ErrorAction Stop
-        $candidate = [string]$manifest.Package.Properties.DisplayName
+        $packageNode = Get-ObjectPropertyValue -Object $manifest -Name "Package"
+        $propertiesNode = Get-ObjectPropertyValue -Object $packageNode -Name "Properties"
+        $candidate = Get-ObjectPropertyText -Object $propertiesNode -Name "DisplayName"
         if ($candidate -and $candidate -notmatch '^ms-resource:') { $displayName = $candidate }
+        $applicationsNode = Get-ObjectPropertyValue -Object $packageNode -Name "Applications"
+        foreach ($application in @((Get-ObjectPropertyValue -Object $applicationsNode -Name "Application"))) {
+            $executable = Get-ObjectPropertyText -Object $application -Name "Executable"
+            $leaf = [System.IO.Path]::GetFileNameWithoutExtension($executable)
+            if ($leaf -match '^[A-Za-z0-9._-]{1,128}$') { $knownProcessNames += $leaf }
+        }
     }
     catch { }
+    $knownProcessNames = @($knownProcessNames | Select-Object -Unique | Select-Object -First 16)
+    $isFramework = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsFramework")
+    $isResourcePackage = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsResourcePackage")
+    $isPartiallyStaged = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsPartiallyStaged")
+    $isOptionalPackage = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsOptionalPackage")
+    $isBundle = [bool](Get-ObjectPropertyValue -Object $Package -Name "IsBundle")
+    $nonRemovable = [bool](Get-ObjectPropertyValue -Object $Package -Name "NonRemovable")
+    $packageStatus = [string](Get-ObjectPropertyValue -Object $Package -Name "Status")
     $identity = [ordered]@{
         packageFullName = [string]$Package.PackageFullName
         name = $name
@@ -524,11 +781,19 @@ function New-AppxApplication {
         version = ([string]$Package.Version)
         packageFamilyName = [string]$Package.PackageFamilyName
         installLocation = [string]$Package.InstallLocation
-        isFramework = [bool]$Package.IsFramework
-        isResourcePackage = [bool]$Package.IsResourcePackage
-        signatureKind = [string]$Package.SignatureKind
+        isFramework = $isFramework
+        isResourcePackage = $isResourcePackage
+        isPartiallyStaged = $isPartiallyStaged
+        isOptionalPackage = $isOptionalPackage
+        isBundle = $isBundle
+        nonRemovable = $nonRemovable
+        packageStatus = $packageStatus
+        signatureKind = [string](Get-ObjectPropertyValue -Object $Package -Name "SignatureKind")
     }
-    $protectedReason = Get-ProtectionReason -Name $displayName -Publisher $identity.publisher -AppxName $name -IsFramework $identity.isFramework -IsResourcePackage $identity.isResourcePackage -SignatureKind $identity.signatureKind
+    $running = Test-RunningProcess -Names $knownProcessNames
+    $protectedReason = Get-ProtectionReason -Name $displayName -Publisher $identity.publisher -AppxName $name -IsFramework $identity.isFramework -IsResourcePackage $identity.isResourcePackage -SignatureKind $identity.signatureKind -NonRemovable $identity.nonRemovable -IsPartiallyStaged $identity.isPartiallyStaged -PackageStatus $identity.packageStatus
+    $enabled = [string]::IsNullOrWhiteSpace($protectedReason) -and $running -eq $false
+    $reason = if ($protectedReason) { $protectedReason } elseif ($null -eq $running) { "无法确认 Appx 是否正在运行，已停止卸载" } elseif ($running) { "软件正在运行，请先退出后再卸载" } else { "" }
     $item = [ordered]@{
         id = Get-ApplicationId -Kind "appx" -Identity ([PSCustomObject]$identity)
         kind = "appx"
@@ -538,9 +803,11 @@ function New-AppxApplication {
         publisher = $identity.publisher
         version = $identity.version
         scope = "user"
-        enabled = [string]::IsNullOrWhiteSpace($protectedReason)
+        enabled = $enabled
         protected = (-not [string]::IsNullOrWhiteSpace($protectedReason))
-        reason = if ($protectedReason) { $protectedReason } else { "" }
+        running = $running
+        knownProcessNames = $knownProcessNames
+        reason = $reason
         identity = $identity
     }
     return [PSCustomObject]$item
@@ -621,14 +888,23 @@ function Compare-Identity {
     if ($Kind -eq "appx") {
         return ((Get-ObjectPropertyText -Object $expectedIdentity -Name packageFullName) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name packageFullName) -and
             (Get-ObjectPropertyText -Object $expectedIdentity -Name publisher) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name publisher) -and
-            (Get-ObjectPropertyText -Object $expectedIdentity -Name version) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name version))
+            (Get-ObjectPropertyText -Object $expectedIdentity -Name version) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name version) -and
+            (Get-ObjectPropertyText -Object $expectedIdentity -Name nonRemovable) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name nonRemovable) -and
+            (Get-ObjectPropertyText -Object $expectedIdentity -Name isPartiallyStaged) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name isPartiallyStaged) -and
+            (Get-ObjectPropertyText -Object $expectedIdentity -Name packageStatus) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name packageStatus) -and
+            (Get-ObjectPropertyText -Object $expectedIdentity -Name signatureKind) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name signatureKind))
     }
     return ((Get-ObjectPropertyText -Object $expectedIdentity -Name registryPath) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name registryPath) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name registryView) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name registryView) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name displayName) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name displayName) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name publisher) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name publisher) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name version) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name version) -and
+        (Get-ObjectPropertyText -Object $expectedIdentity -Name productCode) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name productCode) -and
+        (Get-ObjectPropertyText -Object $expectedIdentity -Name msiProductCode) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name msiProductCode) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name uninstallHash) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name uninstallHash) -and
+        (Get-ObjectPropertyText -Object $expectedIdentity -Name uninstallExecutableHash) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name uninstallExecutableHash) -and
+        (Get-ObjectPropertyText -Object $expectedIdentity -Name uninstallExecutableLength) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name uninstallExecutableLength) -and
+        (Get-ObjectPropertyText -Object $expectedIdentity -Name uninstallExecutableLastWriteUtc) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name uninstallExecutableLastWriteUtc) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name systemComponent) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name systemComponent) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name noRemove) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name noRemove) -and
         (Get-ObjectPropertyText -Object $expectedIdentity -Name releaseType) -eq (Get-ObjectPropertyText -Object $currentIdentity -Name releaseType) -and
@@ -766,11 +1042,15 @@ function Invoke-Execute {
             [void]$results.Add((New-Result -Id $id -Name ([string]$current.name) -Status "blocked" -Message ([string]$current.reason)))
             continue
         }
-        if ($kind -eq "appx") {
-            [void]$results.Add((Invoke-AppxUninstall -Application $current))
+        $result = if ($kind -eq "appx") {
+            Invoke-AppxUninstall -Application $current
+        } else {
+            Invoke-Win32Uninstall -Application $current
         }
-        else {
-            [void]$results.Add((Invoke-Win32Uninstall -Application $current))
+        [void]$results.Add($result)
+        if ($result.status -eq "unknown") {
+            Add-Warning "卸载结果未知，已停止执行剩余选中项目；请先检查 Windows 状态"
+            break
         }
     }
     return [PSCustomObject]@{ ok = $true; action = "execute"; results = $results.ToArray(); warnings = $script:Warnings.ToArray() }
