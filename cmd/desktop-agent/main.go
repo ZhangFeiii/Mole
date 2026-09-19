@@ -1,8 +1,9 @@
-// Mole Desktop's child process has exactly two read-only commands. It never
+// Mole Desktop's child process exposes read-only commands only. It never
 // invokes PowerShell, a shell, or the upstream cleanup/uninstall executables.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,8 +48,42 @@ func run(args []string, out io.Writer) error {
 }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	var err error
+	if len(os.Args) == 2 && os.Args[1] == "inspect" {
+		err = runInspect(os.Stdin, os.Stdout)
+	} else {
+		err = run(os.Args[1:], os.Stdout)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// Inspect requests are data on stdin, not interpolated shell arguments.
+func runInspect(in io.Reader, out io.Writer) error {
+	var request struct {
+		Paths []string `json:"paths"`
+	}
+	payload, err := io.ReadAll(io.LimitReader(in, 2*1024*1024+1))
+	if err != nil {
+		return err
+	}
+	if len(payload) > 2*1024*1024 {
+		return fmt.Errorf("inspection request exceeds 2 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("unexpected trailing input")
+	}
+	result, err := desktop.InspectPaths(request.Paths)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(result)
 }

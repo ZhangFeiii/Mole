@@ -1,5 +1,5 @@
-> **本 fork 的新功能：Windows 只读桌面 GUI（开发预览）**<br>
-> 磁盘扫描、空间分布、大文件和实时系统状态；不提供删除或优化操作。<br>
+> **本 fork 的新功能：Windows 受控维护桌面版（开发预览）**<br>
+> 磁盘分析、实时状态、缓存回收、官方软件卸载和可选系统维护；写入先预览、手动选择、原生确认。<br>
 > [GUI 说明与开发方法](desktop/README.md) · [Windows 构建下载](https://github.com/ZhangFeiii/Mole/actions/workflows/desktop.yml)
 
 <div align="center">

@@ -1,0 +1,129 @@
+.maintenance-page .notice {
+  margin-bottom: 18px;
+  line-height: 1.7;
+}
+.maintenance-toolbar,
+.maintenance-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+}
+.maintenance-toolbar .primary-button,
+.maintenance-footer .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.maintenance-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 15px;
+  padding: 20px 24px;
+  border-top: 1px solid var(--line);
+}
+.maintenance-item input {
+  margin-top: 4px;
+  accent-color: var(--green);
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+}
+.maintenance-item > div {
+  min-width: 0;
+  flex: 1;
+}
+.maintenance-item strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.maintenance-item p,
+.maintenance-item small {
+  color: #748378;
+  line-height: 1.65;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.maintenance-item.disabled {
+  background: #f9faf8;
+}
+.maintenance-item .maintenance-reason {
+  color: #9b7347;
+}
+.maintenance-meta {
+  text-align: right;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.maintenance-meta small {
+  display: block;
+}
+.maintenance-footer {
+  padding: 18px 24px;
+  border-top: 1px solid var(--line);
+  background: #f8faf7;
+}
+.maintenance-results {
+  margin-top: 24px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+.maintenance-results h2 {
+  margin-bottom: 16px;
+}
+.maintenance-result {
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.maintenance-result > span {
+  margin-left: 16px;
+  color: var(--green);
+}
+.maintenance-result p {
+  line-height: 1.7;
+  color: #748378;
+  overflow-wrap: anywhere;
+}
+.maintenance-page .files-toolbar input {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 12px;
+  width: 240px;
+}
+.hero.compact-hero {
+  height: auto;
+  min-height: 0;
+  padding: 25px 30px;
+  background: #f0f5ef;
+  color: #26342f;
+}
+.compact-hero .hero-copy {
+  position: static;
+  padding: 0;
+}
+.compact-hero h2 {
+  font-size: 25px;
+  line-height: 1.4;
+  margin: 12px 0;
+  letter-spacing: 0;
+}
+.compact-hero .hero-copy p {
+  margin: 0 0 12px;
+  color: #748378;
+}
+.compact-hero .hero-kicker,
+.compact-hero .hero-secondary {
+  color: #667c6b;
+}
+.primary-button {
+  border: 0;
+  border-radius: 7px;
+  padding: 11px 16px;
+  color: #fff;
+  background: var(--green);
+  font-weight: 600;
+}

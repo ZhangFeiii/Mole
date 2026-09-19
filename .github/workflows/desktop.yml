@@ -1,8 +1,8 @@
-name: Read-only Desktop
+name: Windows Desktop Core
 
 on:
   push:
-    branches: ["codex/windows-gui-readonly", "windows"]
+    branches: ["codex/windows-core", "windows"]
     paths: ["desktop/**", "internal/desktop/**", "cmd/desktop-agent/**", "go.mod", "go.sum", ".github/workflows/desktop.yml"]
   pull_request:
     branches: [windows]
@@ -36,8 +36,10 @@ jobs:
       - name: Build native collector and renderer
         working-directory: desktop
         run: npm run build
-      - name: Test IPC, native readings, cancellation and read-only boundary
+      - name: Test IPC, native readings and controlled maintenance boundaries
         working-directory: desktop
+        env:
+          MOLE_NATIVE_WINDOWS: "1"
         run: npm test
       - name: Test actual Windows GUI
         working-directory: desktop
@@ -59,7 +61,7 @@ jobs:
         run: npm run test:e2e
       - uses: actions/upload-artifact@v4
         with:
-          name: Mole-Desktop-Windows-x64
+          name: Mole-Desktop-Core-Windows-x64
           path: |
             desktop/release/Mole-Desktop-*.exe
             desktop/release/SHA256SUMS.txt

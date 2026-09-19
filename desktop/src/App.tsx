@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { Bootstrap, Entry, Metrics, ScanResult } from "./types";
 import { Icon, type IconName } from "./Icon";
 import { bytes, duration, percent, rates, treemap } from "./utils";
+import { Maintenance } from "./Maintenance";
+import type { MaintenanceKind } from "./maintenanceTypes";
 
-type Page = "overview" | "analyze" | "status";
+type Page = "overview" | "analyze" | "status" | MaintenanceKind;
 type ScanState =
   | "idle"
   | "running"
@@ -11,7 +13,14 @@ type ScanState =
   | "complete"
   | "cancelled"
   | "error";
-const pageNames = { overview: "概览", analyze: "磁盘分析", status: "系统状态" };
+const pageNames = {
+  overview: "概览",
+  analyze: "磁盘分析",
+  status: "系统状态",
+  cleanup: "垃圾清理",
+  applications: "软件管理",
+  optimize: "性能维护",
+};
 const skipNames: Record<string, string> = {
   link: "链接 / 目录联接",
   cloud: "云端占位文件",
@@ -98,23 +107,6 @@ function MetricCard({
       <div className="metric-detail">{detail}</div>
       {values && <Sparkline values={values} color={color} />}
     </section>
-  );
-}
-
-function Planet({ small = false }: { small?: boolean }) {
-  return (
-    <div className={`planet-scene ${small ? "small" : ""}`} aria-hidden="true">
-      <div className="orbit orbit-one" />
-      <div className="orbit orbit-two" />
-      <div className="planet">
-        <div className="continent one" />
-        <div className="continent two" />
-        <div className="planet-shade" />
-      </div>
-      <span className="star star-one" />
-      <span className="star star-two" />
-      <span className="satellite" />
-    </div>
   );
 }
 
@@ -333,6 +325,9 @@ export function App() {
               ["overview", "grid"],
               ["analyze", "disk"],
               ["status", "activity"],
+              ["cleanup", "spark"],
+              ["applications", "grid"],
+              ["optimize", "cpu"],
             ] as [Page, IconName][]
           ).map(([id, icon]) => (
             <button
@@ -348,20 +343,14 @@ export function App() {
           ))}
         </nav>
         <div className="sidebar-divider" />
-        <div className="workspace-label">后续阶段</div>
-        <div className="nav-item unavailable" title="只读预览版不提供清理功能">
-          <Icon name="spark" />
-          <span>清理与优化</span>
-          <Icon name="lock" size={13} />
-        </div>
         <div className="sidebar-bottom">
           <div className="safety-note">
             <Icon name="shield" size={22} />
-            <strong>只看，不改动</strong>
+            <strong>先预览，再确认</strong>
             <p>
               文件留在本机。
               <br />
-              不删除，不上传，不提权。
+              不上传，不静默执行。
             </p>
           </div>
           <div className="build-label">
@@ -382,11 +371,21 @@ export function App() {
               <span className="live-dot" /> 本地运行
             </span>
             <span className="readonly-badge">
-              <Icon name="shield" size={14} /> 只读模式
+              <Icon name="shield" size={14} />{" "}
+              {boot?.maintenance ? "受控维护" : "只读模式"}
             </span>
           </div>
         </header>
         <div className="page-content">
+          {(page === "cleanup" ||
+            page === "applications" ||
+            page === "optimize") && (
+            <Maintenance
+              key={page}
+              kind={page}
+              supported={boot?.maintenance === true}
+            />
+          )}
           {error && (
             <div role="alert" className="notice error">
               <Icon name="info" />
@@ -417,23 +416,19 @@ export function App() {
                   <p>你的磁盘与系统状态，尽在眼前。</p>
                 </div>
                 <span className="phase-label">
-                  PREVIEW <strong>01</strong>
+                  LOCAL <strong>02</strong>
                 </span>
               </div>
-              <section className="hero">
+              <section className="hero compact-hero">
                 <div className="hero-copy">
                   <span className="hero-kicker">
                     <span /> 从了解你的磁盘开始
                   </span>
-                  <h2>
-                    给磁盘一点
-                    <br />
-                    呼吸的空间。
-                  </h2>
+                  <h2>分析空间，按需维护。</h2>
                   <p>
                     找出空间都去了哪里。
                     <br />
-                    先看清，再决定——这一次，我们只读取。
+                    先看清，再决定。维护前逐项确认。
                   </p>
                   <button
                     className="hero-button"
@@ -449,10 +444,6 @@ export function App() {
                   >
                     选择其他文件夹
                   </button>
-                </div>
-                <Planet />
-                <div className="hero-coordinate">
-                  LOCAL EXPLORER <span>·</span> READ ONLY
                 </div>
               </section>
               <div className="section-heading">
@@ -526,7 +517,7 @@ export function App() {
               </div>
               <div className="footnote">
                 <Icon name="shield" size={15} />{" "}
-                本阶段仅分析与监控，不会修改你的文件或系统设置。
+                分析与监控始终只读；清理、卸载和维护需先预览并单独确认。
               </div>
             </>
           )}
@@ -863,7 +854,7 @@ export function App() {
               )}
               {!result && !busy && (
                 <section className="scan-empty">
-                  <Planet small />
+                  <Icon name="folder" size={44} />
                   <h2>
                     {scanState === "error" ? "扫描未完成" : "先了解，再整理。"}
                   </h2>
@@ -1022,7 +1013,8 @@ export function App() {
             开源项目
           </span>
           <span>
-            <Icon name="shield" size={12} /> 无删除权限接口
+            <Icon name="shield" size={12} />{" "}
+            {boot?.maintenance ? "写入操作须确认" : "本平台仅支持只读"}
           </span>
         </footer>
       </main>

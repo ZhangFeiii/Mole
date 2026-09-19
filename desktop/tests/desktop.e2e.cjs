@@ -66,7 +66,11 @@ test("overview is a real isolated desktop window with live metrics", async () =>
   await expect(
     page.getByRole("heading", { name: "看清空间，从容整理。" }),
   ).toBeVisible();
-  await expect(page.getByText("只读模式", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(process.platform === "win32" ? "受控维护" : "只读模式", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect
     .poll(() => page.locator(".metric-value").nth(1).textContent())
     .not.toBe("—");
@@ -151,4 +155,145 @@ test("folder chooser, empty state, denied roots and live status work", async () 
   await expect(page.locator(".status-number").first()).not.toHaveText("—");
   await page.screenshot({ path: "test-results/status.png", fullPage: true });
   expect(await snapshot()).toEqual(hashes);
+});
+
+test("maintenance pages preview real capabilities and cancelling never executes", async () => {
+  test.setTimeout(180000);
+  // Never confirm a mutation against the runner's real files or installed apps.
+  await app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async () => ({
+      response: 0,
+      checkboxChecked: false,
+    });
+  });
+  for (const [kind, name, title, preview] of [
+    ["cleanup", "垃圾清理", "让空间回到你手中。", "扫描可清理缓存"],
+    ["applications", "软件管理", "软件去留，由你决定。", "扫描已安装软件"],
+    ["optimize", "性能维护", "有依据地维护电脑。", "检查维护选项"],
+  ]) {
+    await page.getByRole("button", { name, exact: true }).click();
+    await expect(page.getByRole("heading", { name: title })).toBeVisible();
+    if (process.platform !== "win32") {
+      await expect(
+        page.getByRole("button", { name: preview, exact: true }),
+      ).toBeDisabled();
+      const rejected = await page.evaluate(async (kind) => {
+        try {
+          await window.mole.maintenancePreview(kind);
+          return false;
+        } catch {
+          return true;
+        }
+      }, kind);
+      expect(rejected).toBe(true);
+    } else {
+      await page.getByRole("button", { name: preview, exact: true }).click();
+      await expect(page.getByText(/预览清单 ·/)).toBeVisible({
+        timeout: 90000,
+      });
+      await expect(page.locator('input[type="checkbox"]:checked')).toHaveCount(
+        0,
+      );
+      const plan = await page.evaluate(
+        (kind) => window.mole.maintenancePreview(kind),
+        kind,
+      );
+      expect(Array.isArray(plan.items)).toBe(true);
+      const enabled = plan.items.find((item) => item.enabled !== false);
+      if (enabled) {
+        const cancelled = await page.evaluate(
+          async ({ kind, id, selected }) =>
+            window.mole.maintenanceExecute(kind, id, [selected]),
+          { kind, id: plan.id, selected: enabled.id },
+        );
+        expect(cancelled.cancelled).toBe(true);
+        expect(cancelled.results).toEqual([]);
+      }
+      const forged = await page.evaluate(
+        async ({ kind, id }) => {
+          try {
+            await window.mole.maintenanceExecute(kind, id, [
+              "not-a-preview-item",
+            ]);
+            return false;
+          } catch {
+            return true;
+          }
+        },
+        { kind, id: plan.id },
+      );
+      expect(forged).toBe(true);
+    }
+    await page.screenshot({ path: `test-results/${kind}.png`, fullPage: true });
+  }
+  expect(await snapshot()).toEqual(hashes);
+});
+
+test("Windows recycle bin receives only a dedicated disposable cache fixture", async () => {
+  test.skip(
+    process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true",
+    "Native mutation runs only in ephemeral Windows CI",
+  );
+  test.setTimeout(90000);
+  const directory = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "mole-recycle-测试-")),
+  );
+  const disposable = path.join(directory, "disposable.tmp");
+  const protectedFile = path.join(directory, "important.docx.tmp");
+  await fs.writeFile(disposable, "disposable fixture cache");
+  await fs.writeFile(protectedFile, "preserve this fixture document");
+  const proof = await app.evaluate(async ({ app, shell }, directory) => {
+    const load = process
+      .getBuiltinModule("node:module")
+      .createRequire(app.getAppPath() + "/package.json");
+    const path = load("node:path");
+    const { createCleanupService } = load("./electron/cleanup.cjs");
+    const { createMaintenanceController } = load("./electron/maintenance.cjs");
+    const events = [];
+    const cleanup = createCleanupService({
+      executable: path.join(
+        app.isPackaged
+          ? path.join(process.resourcesPath, "agent")
+          : path.join(app.getAppPath(), "resources"),
+        "desktop-agent.exe",
+      ),
+      trashItem: (value) => shell.trashItem(value),
+      home: directory,
+      env: {},
+      testRoots: [
+        {
+          id: "fixture",
+          name: "Disposable test cache",
+          path: directory,
+          extensions: [".tmp"],
+          daysOld: 0,
+        },
+      ],
+      testWhitelistPath: path.join(directory, "whitelist.txt"),
+    });
+    const controller = createMaintenanceController({
+      services: { cleanup },
+      confirm: async () => {
+        events.push("confirmed");
+        return true;
+      },
+      audit: async (event) => {
+        events.push(event.event);
+      },
+    });
+    const plan = await controller.preview("cleanup");
+    if (plan.items.length !== 1 || plan.items[0].name !== "disposable.tmp")
+      return { plan, events };
+    const result = await controller.execute("cleanup", plan.id, [
+      plan.items[0].id,
+    ]);
+    return { result, events };
+  }, directory);
+  expect(proof.result, JSON.stringify(proof)).toBeTruthy();
+  expect(proof.result.results[0].status, JSON.stringify(proof)).toBe("success");
+  expect(proof.events).toEqual(["confirmed", "started", "finished"]);
+  await expect(fs.stat(disposable)).rejects.toThrow();
+  expect(await fs.readFile(protectedFile, "utf8")).toBe(
+    "preserve this fixture document",
+  );
 });

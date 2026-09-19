@@ -1,3 +1,9 @@
+import type {
+  MaintenanceKind,
+  MaintenancePlan,
+  MaintenanceResult,
+} from "./maintenanceTypes";
+
 export interface Entry {
   name: string;
   path: string;
@@ -47,7 +53,8 @@ export interface Bootstrap {
   home: string;
   platform: string;
   version: string;
-  readOnly: true;
+  readOnly: boolean;
+  maintenance: boolean;
 }
 export interface MoleBridge {
   bootstrap(): Promise<Bootstrap>;
@@ -56,6 +63,12 @@ export interface MoleBridge {
   scan(root: string, id: string): Promise<ScanResult | { cancelled: true }>;
   cancel(id: string): Promise<void>;
   reveal(path: string): Promise<void>;
+  maintenancePreview(kind: MaintenanceKind): Promise<MaintenancePlan>;
+  maintenanceExecute(
+    kind: MaintenanceKind,
+    planId: string,
+    selectedIds: string[],
+  ): Promise<MaintenanceResult>;
   onProgress(
     callback: (event: { id: string; data: ScanResult }) => void,
   ): () => void;

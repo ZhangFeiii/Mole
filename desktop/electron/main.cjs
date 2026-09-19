@@ -11,6 +11,14 @@ const fs = require("node:fs/promises");
 const { pathToFileURL } = require("node:url");
 const { startAgent } = require("./agent.cjs");
 const { authorizePath, trustedSender } = require("./security.cjs");
+const {
+  createMaintenanceController,
+  createAuditLog,
+} = require("./maintenance.cjs");
+const { createPowerShellRunner } = require("./powershell.cjs");
+const { createCleanupService } = require("./cleanup.cjs");
+const { createApplicationsService } = require("./applications.cjs");
+const { createOptimizeService } = require("./optimize.cjs");
 
 app.setName("Mole Desktop");
 const indexPath = path.join(__dirname, "../dist/index.html");
@@ -28,6 +36,7 @@ let activeScan;
 let statusJob;
 let lastStatus;
 let lastStatusAt = 0;
+let maintenance;
 
 function handle(channel, fn) {
   ipcMain.handle(channel, (event, ...args) => {
@@ -41,8 +50,13 @@ handle("mole:bootstrap", () => ({
   home,
   platform: process.platform,
   version: app.getVersion(),
-  readOnly: true,
+  readOnly: process.platform !== "win32",
+  maintenance: process.platform === "win32",
 }));
+handle("mole:maintenance-preview", (kind) => maintenance.preview(kind));
+handle("mole:maintenance-execute", (kind, planId, selectedIds) =>
+  maintenance.execute(kind, planId, selectedIds),
+);
 handle("mole:choose", async () => {
   const choice = await dialog.showOpenDialog(window, {
     title: "选择要只读分析的本地文件夹",
@@ -112,7 +126,85 @@ function stopJobs() {
   activeScan?.job?.cancel();
   statusJob?.cancel();
 }
+let closeNotice;
+let allowExit = false;
+function preventUntrackedExit(event) {
+  if (allowExit || !maintenance?.isExecuting()) return;
+  event.preventDefault();
+  if (!closeNotice) {
+    closeNotice = dialog
+      .showMessageBox(window, {
+        type: "warning",
+        title: "维护尚未结束",
+        message: "建议等待当前确认或维护返回结果后再退出。",
+        detail:
+          "若现在退出，已启动的 Windows 卸载或维护可能继续，退出不能撤销它们。下次使用前请检查系统状态，不要重复执行。",
+        buttons: ["继续等待", "确认退出（结果可能未知）"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      })
+      .then(async (choice) => {
+        if (choice.response !== 1) return;
+        try {
+          await maintenance.abandon();
+        } catch {
+          dialog.showErrorBox(
+            "日志写入失败",
+            "维护结果未知，退出记录未能保存。请检查 Windows 是否仍有正在运行的操作。",
+          );
+        }
+        allowExit = true;
+        app.quit();
+      })
+      .finally(() => {
+        closeNotice = undefined;
+      });
+  }
+}
 async function createWindow() {
+  const runPowerShell = createPowerShellRunner({
+    scriptsDirectory: app.isPackaged
+      ? path.join(process.resourcesPath, "windows")
+      : path.join(__dirname, "../windows"),
+  });
+  maintenance = createMaintenanceController({
+    services: {
+      cleanup: createCleanupService({
+        executable,
+        trashItem: (value) => shell.trashItem(value),
+      }),
+      applications: createApplicationsService({ runPowerShell }),
+      optimize: createOptimizeService({ runPowerShell }),
+    },
+    audit: createAuditLog(
+      path.join(app.getPath("userData"), "maintenance-logs"),
+    ),
+    confirm: async ({ title, items, kind }) => {
+      const detail =
+        items
+          .slice(0, 25)
+          .map((item) => `• ${item.name}`)
+          .join("\n") +
+        (items.length > 25 ? `\n…共 ${items.length} 项` : "") +
+        (kind === "applications"
+          ? "\n\n软件卸载不能通过回收站恢复。请先备份软件数据；第三方卸载程序可能显示独立确认窗口。"
+          : kind === "cleanup"
+            ? "\n\n文件仅移入回收站；若回收失败，不会改为永久删除。"
+            : "\n\n将执行所选 Windows 维护操作；不保证提高性能。权限不足的项目会明确跳过或报错。");
+      const choice = await dialog.showMessageBox(window, {
+        type: "warning",
+        title,
+        message: `${title}？`,
+        detail,
+        buttons: ["取消", "确认执行"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return choice.response === 1;
+    },
+  });
   home = await fs.realpath(app.getPath("home"));
   roots = [home];
   window = new BrowserWindow({
@@ -133,6 +225,7 @@ async function createWindow() {
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
+  window.on("close", preventUntrackedExit);
   window.on("closed", () => {
     stopJobs();
     window = undefined;
@@ -159,5 +252,8 @@ app
     dialog.showErrorBox("Mole Desktop 无法启动", error.message);
     app.quit();
   });
-app.on("before-quit", stopJobs);
+app.on("before-quit", (event) => {
+  preventUntrackedExit(event);
+  if (!event.defaultPrevented) stopJobs();
+});
 app.on("window-all-closed", () => app.quit());

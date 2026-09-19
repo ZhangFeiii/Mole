@@ -1,94 +1,65 @@
-# Mole Desktop — 只读 Windows GUI
+# Mole Desktop — Windows 受控维护版
 
-基于 [tw93/Mole 的 Windows 分支](https://github.com/tw93/Mole/tree/windows) 的独立社区桌面界面。
-保留上游 MIT 许可；不是官方 Mac GUI 的移植包，也不包含商业版素材或授权补丁。
+基于 tw93/Mole Windows 分支的独立社区桌面应用，保留 MIT 许可。不是商业 Mac GUI 的移植包，不包含它的素材或授权补丁。原上游 PowerShell CLI 与桌面版是独立入口，本桌面版不直接调用上游的一键清理脚本。
 
-## 第一阶段的范围
+## 核心能力
 
-- **概览**：真实 CPU、内存、本地磁盘容量与文件夹分析入口。
-- **磁盘分析**：选择本地目录，递归统计逻辑大小，查看面积图、当前层占用、递归大文件；支持筛选、排序、下钻、返回、停止扫描与在文件管理器中定位。
-- **系统状态**：实时 CPU、内存趋势、网络速率、主机和系统信息。
-- 不提供清理、卸载、优化、启动项编辑、结束进程、提权、遥测或自动更新。
+| 功能 | 提供 | 边界 |
+|---|---|---|
+| 垃圾清理 | 当前用户缓存预览，按文件选择并移入回收站 | 不永久删除、不清空回收站、不把扫描结果当删除清单 |
+| 软件管理 | Win32/当前用户 Store 软件清单，调用官方卸载程序 | 保护系统组件、驱动及运行时；拒绝危险命令；不猜测删除残留 |
+| 系统状态 | CPU、内存、磁盘、网络速率、运行时长、目录分析 | 真实数据，不编造健康分或不可用的温度/风扇指标 |
+| 性能维护 | 单项选择的 Windows 原生维护 | 权限与支持情况明确；不承诺提速，不改安全服务/注册表/电源策略 |
 
-不使用演示数据代替本机结果。截图测试使用实际创建的合成文件；运行应用时读取的是你的电脑。
+默认没有勾选。每次写入都经过 **预览 → 手动选择 → 原生确认框（默认取消）→ 结果**。
+预览限时 5 分钟，主进程与各服务都校验项目 ID；只执行预览中的项目，一次一个维护任务。执行前重新检查安全条件，失败不冒充成功。
 
-## 下载与启动（Windows）
+## Windows 下载与运行
 
-在本 fork 的 **Actions → Read-only Desktop** 中选择最近通过的运行，下载
-`Mole-Desktop-Windows-x64` artifact，解压后打开 `Mole-Desktop-0.1.0-win-x64.exe`。
-`SHA256SUMS.txt` 可核对完整性。无需安装 Go、Node、Git 或 PowerShell 模块。
+在本 fork 的 [Windows Desktop Core 构建](https://github.com/ZhangFeiii/Mole/actions/workflows/desktop.yml) 选择 `codex/windows-core` 分支的成功运行，下载 `Mole-Desktop-Core-Windows-x64` artifact。
+解压后运行 `Mole-Desktop-0.2.0-win-x64.exe`，用 `SHA256SUMS.txt` 核验完整性。
 
-目前目标是 Windows 10/11 x64，普通用户运行。开发预览包尚未代码签名，Windows 可能显示
-SmartScreen 提示；请核对来源与 SHA-256，**不要关闭系统防护或以管理员身份运行**。
-便携启动器会解压运行文件，Electron 会写自己的用户配置/缓存；“只读”指扫描目标与系统设置，
-并不声称整个应用进程完全没有磁盘写入。
+目标 Windows 10/11 x64，自带 Go 采集器与维护脚本，无需安装开发工具。维护使用系统自带 Windows PowerShell 5.1；脚本执行策略仅作用于该子进程，不改全局策略、不启动网络脚本。
 
-## 数据和安全边界
+普通用户即可分析、监控和清理自己的缓存。某些卸载程序显示 Windows UAC；需管理员权限的维护项目会提示或保持不可选。**不要关闭 SmartScreen、杀毒或系统防护。** 预览包未代码签名，不等于生产安全认证。macOS 开发运行仅开放读取能力，不会清理 Mac。
 
-1. 只读采集器仅支持 `status` 和 `scan ABSOLUTE_DIRECTORY`，没有通用命令执行接口。
-2. GUI 只能扫描用户主目录或通过原生选择器明确授权的目录；IPC 校验来源窗口、主框架及本地页面。
-3. 渲染器开启 sandbox/contextIsolation，关闭 Node 集成，网络请求与新窗口均被阻止。
-4. 扫描只读取目录项和文件元数据，不打开文件内容；使用 Go `os.Root` 的目录句柄约束避免链接交换越界。
-5. 跳过符号链接、Windows reparse points/目录联接、offline/recall 占位文件、特殊文件和其他卷。
-   Windows 网络盘/UNC 路径不在第一阶段支持范围内。某些已本地缓存的 OneDrive 文件也可能因此被跳过。
-6. 权限不足、变化中的文件、取消、深度/数量上限都会显示为**部分结果**。不静默提权。
-7. 最多访问 2,000,000 项、128 层目录，单次扫描最多 30 分钟；列表保留当前层最大的 200 项和递归最大的 100 个文件。
-   这些限制不会让截断统计冒充完整扫描。云盘、杀毒软件和设备驱动可能影响取消响应时间。
-8. 显示的是**逻辑大小**，不是物理分配/可回收空间。硬链接按路径计数；稀疏文件、压缩、权限、APFS/NTFS 元数据
-   都可能导致它与系统已用容量不同。“大文件”不意味着可以删除。
-9. 网络速率由两次接口计数差值计算；首次采样/计数回退显示未知，VPN/虚拟网卡可能重复计数。
-   失败读数显示缺失或明确警告，不伪造健康分、温度、风扇转速。
+## 数据与安全
 
-## 架构
+- 渲染器无 Node 权限，启用 sandbox/contextIsolation；IPC 校验窗口、主框架与本地 URL。禁止网页网络请求、新窗口与导航。
+- Go 采集器只有 status/scan，没有删除或通用 shell。扫描通过目录句柄约束，跳过链接/目录联接、云占位文件、其他卷及特殊文件，部分结果明确标注。
+- 软件/优化脚本由主进程固定白名单选择，使用固定系统 PowerShell 路径；数据通过 stdin JSON 传递，不插入命令表达式。渲染器不能传脚本路径或任意命令。
+- 清理只用回收站，失败不改成永久删除。**卸载不能通过回收站恢复，请先备份软件数据。**
+- 审计日志位于 Electron userData/maintenance-logs 的每日 JSONL 文件（Windows 通常在 %APPDATA%/Mole Desktop）。执行前无法写日志就不执行。日志留在本机，可能含软件名、缓存路径和错误信息，不应随意公开。
+- 日志和 Electron 配置/缓存会写磁盘；“只读分析”指分析目标，不代表应用没有任何文件写入。
+- 不提供遥测、自动更新、永久删除、残留擦除、启动项改写、结束进程或常驻管理员服务。
 
-```text
-desktop/src                 React / TypeScript 界面（没有 Node 权限）
-  ↕ 限定 IPC
-desktop/electron            Electron 主进程、原生目录选择器、路径授权
-  ↕ stdout JSON / 固定参数，无 shell
-cmd/desktop-agent           scan / status 两个只读命令
-internal/desktop            目录扫描、平台跳过策略、gopsutil 系统采集
-```
+目录统计是逻辑大小，不是可回收空间。硬链接、稀疏文件、压缩和权限会造成与系统容量不同。最多扫描 2,000,000 项、128 层、30 分钟，列表保留当前层最大 200 项及大文件最大 100 项，截断标注部分结果。
 
-Go 系统采集沿用 Windows 上游的 gopsutil 依赖与采集结构。扫描逻辑重新实现：上游终端版包含
-删除流程且目录大小是浅层估算，不适合直接接入这个只读 GUI。原有 CLI 文件保持不变。
+## 构建与验证
 
-## 开发和验证
-
-需要 Node.js 24+、Go 1.27.1（CI 固定版本；`os.Root` 最低要求 Go 1.24）。
+需要 Node.js 24+、Go 1.27.1。Go 不在 PATH 时将 MOLE_GO 指向其完整路径。
 
 ```sh
-cd desktop
-npm ci
-npm run dev
-```
-
-Go 不在 PATH 时设置 `MOLE_GO` 为 go 可执行文件完整路径。macOS 可运行开发预览用于界面验证；
-该预览不代表 Windows 硬件兼容性已全部验证。不要在工程根目录运行上游清理命令来验证 GUI。
-
-```sh
-# 仓库根目录：只读后端测试和静态检查
+# 仓库根目录
 go test -race ./internal/desktop ./cmd/desktop-agent
 go vet ./internal/desktop ./cmd/desktop-agent
 
-# desktop 目录：构建、IPC/后端集成、真实 Electron 窗口测试
+cd desktop
+npm ci
 npm run build
 npm test
 npm run test:e2e
-
-# 在 Windows 构建便携包
+# Windows 主机打包
 npm run package:win
 ```
 
-Windows CI 会运行原有 Go 工具测试、新只读后端测试、真实 Electron UI 测试，并生成便携 EXE、
-SHA-256 与测试截图。测试覆盖真实字节统计、中文/特殊字符路径、链接/目录联接、取消、范围限制、
-文件内容不变、空目录、目录选择/下钻/返回/筛选以及 IPC 路径越界拒绝。
+CI 验证 Go、计划授权与取消、原生 Windows 查询、Electron GUI，并在打包后再次运行 GUI，确认随包采集器与 PowerShell 脚本位置。真实写操作的自动测试只能操作自行创建的临时夹具，不能卸载已有软件或清理真实缓存。
 
-发布前还应在你的 Windows 实机验证磁盘权限、OneDrive、外置盘、高 DPI 与 SmartScreen 体验。
-该版本是第一阶段开发预览，不承诺生产级全盘清理安全，也未接入任何清理功能。
+这是受控功能预览，不能据 CI 通过就声称 Windows 硬件、OneDrive、目录联接竞态、杀毒和第三方卸载器均安全。日常使用前仍需 Windows 实机/虚拟机试用，维护效果也需结合实际瓶颈判断。
 
-## 后续里程碑
+## 协作与归档
 
-按用户要求，先验证并冻结只读版：固定 Git 标签、GitHub Release 和 Windows 便携包。
-随后在独立分支实现写入版的受控清理：预览清单、手动勾选、明确确认、移入回收站、操作记录。
-只读版本的标签和发布包保持不变；写入版不默认提供永久删除或系统级优化。
+- 只读基线：codex/windows-gui-readonly，由原任务独立归档，保留其发布包与标签不变。
+- 整体集成、构建与测试：codex/windows-core，独立 worktree。
+- 软件模块：codex/windows-applications；维护模块：codex/windows-optimize；垃圾清理由 codex/windows-cleanup 提供。
+- 各模块持有自己的文件，只在集成分支汇总发布，不修改其他 agent 的工作区。

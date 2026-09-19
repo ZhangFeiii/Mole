@@ -8,6 +8,10 @@ contextBridge.exposeInMainWorld(
     scan: (root, id) => ipcRenderer.invoke("mole:scan", root, id),
     cancel: (id) => ipcRenderer.invoke("mole:cancel", id),
     reveal: (path) => ipcRenderer.invoke("mole:reveal", path),
+    maintenancePreview: (kind) =>
+      ipcRenderer.invoke("mole:maintenance-preview", kind),
+    maintenanceExecute: (kind, planId, selectedIds) =>
+      ipcRenderer.invoke("mole:maintenance-execute", kind, planId, selectedIds),
     onProgress: (callback) => {
       const listener = (_event, data) => callback(data);
       ipcRenderer.on("mole:progress", listener);
