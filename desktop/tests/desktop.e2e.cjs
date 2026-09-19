@@ -34,16 +34,29 @@ test.beforeAll(async () => {
   }
   hashes = await snapshot();
   app = await electron.launch({
-    args: [path.resolve(__dirname, "..")],
+    ...(process.env.MOLE_PACKAGED_EXE
+      ? { executablePath: path.resolve(process.env.MOLE_PACKAGED_EXE) }
+      : {}),
+    args: process.env.MOLE_PACKAGED_EXE ? [] : [path.resolve(__dirname, "..")],
     env: {
       ...process.env,
-      MOLE_E2E: "1",
-      MOLE_TEST_ROOT: root,
       ELECTRON_DISABLE_SECURITY_WARNINGS: "false",
     },
   });
   page = await app.firstWindow();
   await page.waitForLoadState("domcontentloaded");
+  // Exercise the real main-process directory authorization path, including in
+  // packaged builds. Only the native picker response is supplied by the test.
+  await app.evaluate(({ dialog }, selected) => {
+    dialog.showOpenDialog = async () => ({
+      canceled: false,
+      filePaths: [selected],
+    });
+  }, root);
+  await page
+    .getByRole("button", { name: "选择其他文件夹", exact: true })
+    .click();
+  await page.getByRole("button", { name: "概览", exact: true }).click();
 });
 test.afterAll(async () => {
   await app?.close();
@@ -76,10 +89,10 @@ test("scan and treemap match real fixture bytes, drill down, filter and go back"
   await expect(page.getByText("扫描完成", { exact: true })).toBeVisible();
   await expect(page.getByTestId("scan-files")).toHaveText("5");
   const expectedBytes = [...fixtureFiles.values()].reduce((a, b) => a + b, 0);
-  const totals = await page.evaluate(async () => {
-    const boot = await window.mole.bootstrap();
-    return window.mole.scan(boot.home, "verification-scan");
-  });
+  const totals = await page.evaluate(
+    async (scanRoot) => window.mole.scan(scanRoot, "verification-scan"),
+    root,
+  );
   expect(totals.bytes).toBe(expectedBytes);
   expect(totals.partial).toBe(false);
   await expect(page.getByTestId("treemap")).toBeVisible();

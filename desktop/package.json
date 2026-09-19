@@ -13,7 +13,7 @@
     "build:ui": "tsc --noEmit && vite build",
     "build": "npm run build:agent && npm run build:ui",
     "start": "electron .",
-    "test": "node --test tests/security.test.cjs tests/agent.test.cjs",
+    "test": "node --test tests/security.test.cjs tests/agent.test.cjs tests/utils.test.mjs",
     "test:e2e": "playwright test",
     "package:win": "npm run build && electron-builder --win portable --x64",
     "package:dir": "npm run build && electron-builder --dir"

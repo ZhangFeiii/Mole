@@ -113,11 +113,7 @@ function stopJobs() {
   statusJob?.cancel();
 }
 async function createWindow() {
-  const testRoot =
-    !app.isPackaged && process.env.MOLE_E2E === "1"
-      ? process.env.MOLE_TEST_ROOT
-      : undefined;
-  home = await fs.realpath(testRoot || app.getPath("home"));
+  home = await fs.realpath(app.getPath("home"));
   roots = [home];
   window = new BrowserWindow({
     width: 1280,

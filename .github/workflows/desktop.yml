@@ -52,6 +52,11 @@ jobs:
         shell: pwsh
         run: |
           Get-ChildItem release/Mole-Desktop-*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content release/SHA256SUMS.txt
+      - name: Test packaged Windows application
+        working-directory: desktop
+        env:
+          MOLE_PACKAGED_EXE: release/win-unpacked/Mole Desktop.exe
+        run: npm run test:e2e
       - uses: actions/upload-artifact@v4
         with:
           name: Mole-Desktop-Windows-x64

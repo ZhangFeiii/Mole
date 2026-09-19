@@ -305,6 +305,7 @@ export function App() {
     : 0;
   const cpuHistory = history.map((m) => m.cpuPercent);
   const memoryHistory = history.map((m) => m.memoryPercent);
+  const memoryAvailable = metrics?.memoryPercent != null;
   const platformLabel =
     boot?.platform === "win32" ? "WINDOWS" : "macOS 开发预览";
 
@@ -474,8 +475,8 @@ export function App() {
                 <MetricCard
                   icon="memory"
                   label="内存使用"
-                  value={bytes(metrics?.memoryUsed)}
-                  detail={`${bytes(metrics?.memoryTotal)} 总内存`}
+                  value={bytes(memoryAvailable ? metrics?.memoryUsed : null)}
+                  detail={`${bytes(memoryAvailable ? metrics?.memoryTotal : null)} 总内存`}
                   values={memoryHistory}
                   color="#7882bb"
                 />
@@ -678,7 +679,8 @@ export function App() {
                       {tiles.map((tile) => (
                         <button
                           key={tile.entry.path || "other"}
-                          className={`tree-tile tile-${tile.index % 6}`}
+                          className={`tree-tile tile-${tile.index % 6} ${tile.width < 10 || tile.height < 18 ? "compact" : ""}`}
+                          aria-label={`${tile.entry.name} · ${bytes(tile.entry.size)}`}
                           style={{
                             left: `${tile.x}%`,
                             top: `${tile.y}%`,
@@ -921,12 +923,17 @@ export function App() {
                     <h2>
                       <Icon name="memory" size={18} /> 内存
                     </h2>
-                    <span>{bytes(metrics?.memoryTotal)} 总量</span>
+                    <span>
+                      {bytes(memoryAvailable ? metrics?.memoryTotal : null)}{" "}
+                      总量
+                    </span>
                   </div>
                   <strong className="status-number">
                     {percent(metrics?.memoryPercent)}
                   </strong>
-                  <p>已使用 {bytes(metrics?.memoryUsed)}</p>
+                  <p>
+                    已使用 {bytes(memoryAvailable ? metrics?.memoryUsed : null)}
+                  </p>
                   <Sparkline large values={memoryHistory} color="#7882bb" />
                   <div className="chart-axis">
                     <span>最近 {history.length} 次采样</span>
@@ -982,7 +989,9 @@ export function App() {
                   </div>
                   <div>
                     <dt>持续运行</dt>
-                    <dd>{metrics ? duration(metrics.uptime) : "—"}</dd>
+                    <dd>
+                      {metrics?.hostname ? duration(metrics.uptime) : "—"}
+                    </dd>
                   </div>
                   <div>
                     <dt>读取方式</dt>
