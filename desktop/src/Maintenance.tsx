@@ -200,7 +200,9 @@ export function Maintenance({
                   />
                   <div>
                     <strong>{item.name}</strong>
-                    <p>{item.description}</p>
+                    {item.description && item.description !== item.name && (
+                      <p>{item.description}</p>
+                    )}
                     {item.impact && <p>{item.impact}</p>}
                     {(item.publisher || item.version) && (
                       <small>

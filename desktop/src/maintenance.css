@@ -24,6 +24,11 @@
   padding: 20px 24px;
   border-top: 1px solid var(--line);
 }
+.maintenance-items {
+  max-height: 52vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .maintenance-item input {
   margin-top: 4px;
   accent-color: var(--green);
