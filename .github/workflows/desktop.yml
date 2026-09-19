@@ -93,6 +93,7 @@ jobs:
         working-directory: desktop
         env:
           MOLE_PACKAGED_EXE: release/win-unpacked/Mole Desktop.exe
+          MOLE_PORTABLE_DIR: release
         run: npm run test:packaged
       - uses: actions/upload-artifact@v4
         with:

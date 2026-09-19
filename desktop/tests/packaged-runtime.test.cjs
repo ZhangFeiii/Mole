@@ -11,6 +11,7 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { fileURLToPath } = require("node:url");
 const { createAssetVerifier } = require("../electron/integrity.cjs");
 
 const packagedExecutable = process.env.MOLE_PACKAGED_EXE
@@ -78,7 +79,7 @@ async function freePort() {
   return port;
 }
 
-async function cdpReady(port, timeoutMs = 20000) {
+async function cdpReady(port, timeoutMs = 45000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
@@ -207,16 +208,35 @@ test(
 );
 
 test(
-  "hardened package supports renderer-only read-only page smoke and screenshots",
+  "delivered portable EXE self-extracts and supports renderer-only read-only pages",
   { skip: !packagedExecutable || process.platform !== "win32" },
   async () => {
     const { chromium } = require("@playwright/test");
+    const portableDirectory = process.env.MOLE_PORTABLE_DIR
+      ? path.resolve(process.env.MOLE_PORTABLE_DIR)
+      : null;
+    assert.ok(
+      portableDirectory,
+      "MOLE_PORTABLE_DIR is required to test the delivered portable launcher",
+    );
+    let launchExecutable = packagedExecutable;
+    if (portableDirectory) {
+      const names = (await fsp.readdir(portableDirectory)).filter((name) =>
+        /^Mole-Desktop-\d+\.\d+\.\d+-win-x64\.exe$/.test(name),
+      );
+      assert.equal(
+        names.length,
+        1,
+        "expected exactly one portable delivery executable",
+      );
+      launchExecutable = path.join(portableDirectory, names[0]);
+    }
     const port = await freePort();
     const userData = await make_temporary("mole-packaged-cdp-");
     const screenshotRoot = path.resolve("test-results", "packaged");
     await fsp.mkdir(screenshotRoot, { recursive: true });
     const child = spawn(
-      packagedExecutable,
+      launchExecutable,
       [
         `--user-data-dir=${userData}`,
         `--remote-debugging-port=${port}`,
@@ -240,6 +260,23 @@ test(
       await page
         .getByRole("navigation", { name: "主导航" })
         .waitFor({ state: "visible" });
+      if (portableDirectory) {
+        assert.equal(
+          fileURLToPath(page.url())
+            .toLowerCase()
+            .startsWith(
+              (path.dirname(packagedExecutable) + path.sep).toLowerCase(),
+            ),
+          false,
+          "portable launch must load the self-extracted payload, not win-unpacked",
+        );
+        assert.equal(
+          await page
+            .evaluate(() => window.mole.bootstrap())
+            .then((value) => value.maintenance),
+          true,
+        );
+      }
       const pages = [
         ["垃圾清理", "扫描可清理缓存", "cleanup"],
         ["软件管理", "扫描已安装软件", "applications"],
