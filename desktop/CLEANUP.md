@@ -8,6 +8,8 @@
 ```js
 const { createCleanupService } = require("./cleanup.cjs");
 const cleanup = createCleanupService({
+  // Canonical home is resolved by main: await fs.realpath(app.getPath('home')).
+  home,
   // Use the fixed packaged/dev Go collector path already resolved by main.cjs.
   executable,
   trashItem: (value) => shell.trashItem(value),
@@ -30,6 +32,9 @@ const outcome = await cleanup.execute(plan.id, selectedIds);
 ## 默认范围与保护
 
 只在 Windows 启用，默认不接受用户任意指定清理目录：
+
+- 用户根必须由可信主进程显式提供已规范化的 `app.getPath('home')`，不使用 `os.homedir()` 或环境变量推断。
+- 生产缓存根固定为该用户目录下的 `AppData/Local`。`LOCALAPPDATA` 若被覆盖成 Documents、其他用户子目录或不同盘路径，直接拒绝预览和执行；它不能改变清理范围。目录联接/重解析点仍由原生属性与 realpath 校验拒绝。
 
 - 当前用户 `%LOCALAPPDATA%/Temp`：超过 **7 天没有修改或元数据变更**的 `.tmp/.temp/.log/.dmp/.etl/.cache` 普通文件。
 - 当前用户 `%LOCALAPPDATA%/CrashDumps`：超过 7 天的 `.dmp`。

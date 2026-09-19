@@ -1,6 +1,5 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const os = require("node:os");
 const { randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 
@@ -174,7 +173,7 @@ function createCleanupService({
   executable,
   inspectAttributes,
   platform = process.platform,
-  home = os.homedir(),
+  home,
   env = process.env,
   now = Date.now,
   testRoots,
@@ -187,10 +186,15 @@ function createCleanupService({
     cancelled = false,
     closed = false,
     uncertain = false;
-  const userHome = path.resolve(home);
-  const local = path.resolve(
-    env.LOCALAPPDATA || path.join(userHome, "AppData", "Local"),
-  );
+  // The trusted main process supplies its canonical OS home directory. Neither
+  // USERPROFILE nor LOCALAPPDATA may redefine production cleanup roots.
+  const hasTrustedHome =
+    typeof home === "string" &&
+    path.isAbsolute(home) &&
+    !/^(\\\\|\/\/)/.test(home);
+  const userHome = hasTrustedHome ? path.resolve(home) : undefined;
+  const local = userHome ? path.join(userHome, "AppData", "Local") : undefined;
+  const configuredLocal = env.LOCALAPPDATA;
   const variables = {
     ...Object.fromEntries(
       Object.entries(env).map(([k, v]) => [k.toUpperCase(), v]),
@@ -200,26 +204,34 @@ function createCleanupService({
   };
   const whitelistPath =
     testWhitelistPath ||
-    path.join(userHome, ".config", "mole", "whitelist.txt");
-  const roots = testRoots || [
-    {
-      id: "temp",
-      name: "旧临时文件",
-      path: path.join(local, "Temp"),
-      extensions: TEMP_EXTENSIONS,
-      daysOld: 7,
-    },
-    {
-      id: "crash-dumps",
-      name: "旧崩溃转储",
-      path: path.join(local, "CrashDumps"),
-      extensions: [".dmp"],
-      daysOld: 7,
-    },
-  ];
+    (userHome
+      ? path.join(userHome, ".config", "mole", "whitelist.txt")
+      : undefined);
+  const roots =
+    testRoots ||
+    (local
+      ? [
+          {
+            id: "temp",
+            name: "旧临时文件",
+            path: path.join(local, "Temp"),
+            extensions: TEMP_EXTENSIONS,
+            daysOld: 7,
+          },
+          {
+            id: "crash-dumps",
+            name: "旧崩溃转储",
+            path: path.join(local, "CrashDumps"),
+            extensions: [".dmp"],
+            daysOld: 7,
+          },
+        ]
+      : []);
 
   function assertReady() {
     if (platform !== "win32") throw new Error("垃圾清理仅在 Windows 可用");
+    if (!hasTrustedHome)
+      throw new Error("清理需要主进程提供已确认的用户目录，不使用环境变量推断");
     if (closed) throw new Error("清理服务已关闭");
     if (uncertain)
       throw Object.assign(
@@ -231,9 +243,14 @@ function createCleanupService({
     if (busy) throw new Error("已有清理操作正在进行");
     if (
       !testRoots &&
-      (!within(userHome, local) || normalized(local) === normalized(userHome))
+      configuredLocal != null &&
+      (typeof configuredLocal !== "string" ||
+        !path.isAbsolute(configuredLocal) ||
+        normalized(configuredLocal) !== normalized(local))
     )
-      throw new Error("LocalAppData 不在当前用户目录中，已拒绝清理");
+      throw new Error(
+        "LocalAppData 与当前用户规范 AppData/Local 不一致，已拒绝清理",
+      );
   }
   function checkCancelled() {
     if (closed || cancelled) throw new Error("清理已取消；未继续执行剩余项目");
