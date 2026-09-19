@@ -1,4 +1,10 @@
-const { mkdirSync, readdirSync, copyFileSync } = require("node:fs");
+const {
+  mkdirSync,
+  readdirSync,
+  copyFileSync,
+  chmodSync,
+  existsSync,
+} = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const desktop = path.resolve(__dirname, "..");
@@ -35,12 +41,19 @@ if (result.status !== 0) process.exit(result.status ?? 1);
 // Include upstream/runtime license texts with the binary, not just repository links.
 const licenses = path.join(desktop, "resources", "licenses");
 mkdirSync(licenses, { recursive: true });
-copyFileSync(
+function copyLicense(source, destination) {
+  // Go module-cache licenses are read-only; copies must be replaceable on the
+  // next build. Only generated license files are changed, never module sources.
+  if (existsSync(destination)) chmodSync(destination, 0o644);
+  copyFileSync(source, destination);
+  chmodSync(destination, 0o644);
+}
+copyLicense(
   path.join(desktop, "..", "LICENSE"),
   path.join(licenses, "Mole-MIT.txt"),
 );
 for (const pkg of ["react", "react-dom", "scheduler"])
-  copyFileSync(
+  copyLicense(
     path.join(desktop, "node_modules", pkg, "LICENSE"),
     path.join(licenses, `${pkg}-MIT.txt`),
   );
@@ -52,7 +65,7 @@ const goroot = spawnSync(go, ["env", "GOROOT"], {
   env: process.env,
 });
 if (goroot.status !== 0) throw new Error("Cannot locate Go runtime license");
-copyFileSync(
+copyLicense(
   path.join(goroot.stdout.trim(), "LICENSE"),
   path.join(licenses, "Go-BSD.txt"),
 );
@@ -77,7 +90,7 @@ for (const line of new Set(modules.stdout.split(/\r?\n/).filter(Boolean))) {
   );
   if (!files.length) throw new Error(`Missing license for ${name}`);
   for (const file of files)
-    copyFileSync(
+    copyLicense(
       path.join(directory, file),
       path.join(licenses, `${name.replaceAll("/", "_")}-${file}`),
     );

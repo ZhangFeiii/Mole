@@ -48,4 +48,8 @@ func TestWindowsJunctionNotFollowed(t *testing.T) {
 	if skipReason(link, info) != "link" {
 		t.Fatal("junction not excluded")
 	}
+	inspection, err := InspectPaths([]string{link})
+	if err != nil || inspection.Items[0].Attributes == nil || *inspection.Items[0].Attributes&0x400 == 0 {
+		t.Fatalf("native junction inspection failed: %+v %v", inspection, err)
+	}
 }

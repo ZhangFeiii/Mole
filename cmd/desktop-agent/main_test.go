@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +13,42 @@ func TestCommandAllowlist(t *testing.T) {
 		if err := run(args, &bytes.Buffer{}); err == nil {
 			t.Fatalf("accepted command: %v", args)
 		}
+	}
+}
+
+func TestInspectProtocolRejectsInvalidOrOversizedInput(t *testing.T) {
+	inputs := []string{`{}`, `{"paths":[]}`, `{"paths":["relative"],"command":"clean"}`, `{"paths":["relative"]} {}`, strings.Repeat(" ", 2*1024*1024+1)}
+	for _, input := range inputs {
+		if err := runInspect(strings.NewReader(input), &bytes.Buffer{}); err == nil {
+			t.Fatal("accepted invalid inspection")
+		}
+	}
+	paths := make([]string, 2049)
+	payload, err := json.Marshal(map[string]any{"paths": paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runInspect(bytes.NewReader(payload), &bytes.Buffer{}); err == nil {
+		t.Fatal("accepted excessive path count")
+	}
+}
+
+func TestInspectProtocolReturnsMetadataErrors(t *testing.T) {
+	var out bytes.Buffer
+	if err := runInspect(strings.NewReader(`{"paths":["relative"]}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Items []struct {
+			Error      string  `json:"error"`
+			Attributes *uint32 `json:"attributes"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Error == "" || result.Items[0].Attributes != nil {
+		t.Fatal("failed inspection appeared safe")
 	}
 }
 
