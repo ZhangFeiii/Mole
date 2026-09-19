@@ -1,0 +1,72 @@
+{
+  "name": "mole-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An independent, read-only Windows desktop interface for Mole",
+  "author": "ZhangFeiii",
+  "license": "MIT",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "npm run build && electron .",
+    "build:agent": "node scripts/build-agent.cjs",
+    "build:ui": "tsc --noEmit && vite build",
+    "build": "npm run build:agent && npm run build:ui",
+    "start": "electron .",
+    "test": "node --test tests/security.test.cjs tests/agent.test.cjs",
+    "test:e2e": "playwright test",
+    "package:win": "npm run build && electron-builder --win portable --x64",
+    "package:dir": "npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3",
+    "vite": "8.3.0"
+  },
+  "build": {
+    "appId": "io.github.zhangfeiii.mole.desktop",
+    "productName": "Mole Desktop",
+    "artifactName": "Mole-Desktop-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "THIRD-PARTY-NOTICES.md"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "agent",
+        "filter": [
+          "desktop-agent*",
+          "licenses/**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "identity": null,
+      "category": "public.app-category.utilities"
+    }
+  }
+}

@@ -1,3 +1,7 @@
+> **本 fork 的新功能：Windows 只读桌面 GUI（开发预览）**<br>
+> 磁盘扫描、空间分布、大文件和实时系统状态；不提供删除或优化操作。<br>
+> [GUI 说明与开发方法](desktop/README.md) · [Windows 构建下载](https://github.com/ZhangFeiii/Mole/actions/workflows/desktop.yml)
+
 <div align="center">
   <img src="https://cdn.tw93.fun/pic/cole.png" alt="Mole Logo" width="120" height="120" style="border-radius:50%" />
   <h1>Mole</h1>

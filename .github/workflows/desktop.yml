@@ -1,0 +1,67 @@
+name: Read-only Desktop
+
+on:
+  push:
+    branches: ["codex/windows-gui-readonly", "windows"]
+    paths: ["desktop/**", "internal/desktop/**", "cmd/desktop-agent/**", "go.mod", "go.sum", ".github/workflows/desktop.yml"]
+  pull_request:
+    branches: [windows]
+    paths: ["desktop/**", "internal/desktop/**", "cmd/desktop-agent/**", ".github/workflows/desktop.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Test read-only Go packages
+        run: go test -race ./internal/desktop ./cmd/desktop-agent
+      - name: Test existing Windows Go tools
+        run: go test ./cmd/analyze ./cmd/status
+      - name: Install pinned desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build native collector and renderer
+        working-directory: desktop
+        run: npm run build
+      - name: Test IPC, native readings, cancellation and read-only boundary
+        working-directory: desktop
+        run: npm test
+      - name: Test actual Windows GUI
+        working-directory: desktop
+        run: npm run test:e2e
+      - name: Package portable Windows app
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --win portable --x64 --publish never
+      - name: Hash portable build
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          Get-ChildItem release/Mole-Desktop-*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mole-Desktop-Windows-x64
+          path: |
+            desktop/release/Mole-Desktop-*.exe
+            desktop/release/SHA256SUMS.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Windows-GUI-test-evidence
+          path: desktop/test-results/
+          if-no-files-found: ignore

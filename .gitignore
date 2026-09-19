@@ -91,3 +91,12 @@ session.json
 journal/2026-03-11-safe-remove-design.md
 mole.cmd
 mo.cmd
+
+# Read-only desktop application
+desktop/node_modules/
+desktop/dist/
+desktop/release/
+desktop/resources/
+desktop/test-results/
+desktop/playwright-report/
+.tools/
