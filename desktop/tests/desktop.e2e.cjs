@@ -33,11 +33,17 @@ test.beforeAll(async () => {
     await fs.writeFile(filename, Buffer.alloc(size, 0x4d));
   }
   hashes = await snapshot();
+  const profile = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "mole-e2e-profile-")),
+  );
   app = await electron.launch({
     ...(process.env.MOLE_PACKAGED_EXE
       ? { executablePath: path.resolve(process.env.MOLE_PACKAGED_EXE) }
       : {}),
-    args: process.env.MOLE_PACKAGED_EXE ? [] : [path.resolve(__dirname, "..")],
+    args: [
+      ...(process.env.MOLE_PACKAGED_EXE ? [] : [path.resolve(__dirname, "..")]),
+      `--user-data-dir=${profile}`,
+    ],
     env: {
       ...process.env,
       ELECTRON_DISABLE_SECURITY_WARNINGS: "false",

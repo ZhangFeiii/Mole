@@ -26,7 +26,7 @@
 ## 数据与安全
 
 - 渲染器无 Node 权限，启用 sandbox/contextIsolation；IPC 校验窗口、主框架与本地 URL。禁止网页网络请求、新窗口与导航。
-- Go 采集器只有 status/scan，没有删除或通用 shell。扫描通过目录句柄约束，跳过链接/目录联接、云占位文件、其他卷及特殊文件，部分结果明确标注。
+- Go 采集器只有 status/scan/inspect 三个只读接口，没有删除或通用 shell。inspect 为可信主进程提供原生文件属性，不向网页开放。扫描通过目录句柄约束，跳过链接/目录联接、云占位文件、其他卷及特殊文件，部分结果明确标注。
 - 软件/优化脚本由主进程固定白名单选择，使用固定系统 PowerShell 路径；数据通过 stdin JSON 传递，不插入命令表达式。渲染器不能传脚本路径或任意命令。
 - 清理只用回收站，失败不改成永久删除。**卸载不能通过回收站恢复，请先备份软件数据。**
 - 审计日志位于 Electron userData/maintenance-logs 的每日 JSONL 文件（Windows 通常在 %APPDATA%/Mole Desktop）。执行前无法写日志就不执行。日志留在本机，可能含软件名、缓存路径和错误信息，不应随意公开。
@@ -53,7 +53,7 @@ npm run test:e2e
 npm run package:win
 ```
 
-CI 验证 Go、计划授权与取消、原生 Windows 查询、Electron GUI，并在打包后再次运行 GUI，确认随包采集器与 PowerShell 脚本位置。真实写操作的自动测试只能操作自行创建的临时夹具，不能卸载已有软件或清理真实缓存。
+CI 验证 Go、计划授权与取消、原生 Windows 查询、Electron GUI，并在打包后再次运行 GUI，确认随包采集器与 PowerShell 脚本位置。回收与卸载的真实写测试只操作自行创建的临时文件/唯一注册的测试软件，不卸载已有软件或清理真实缓存；DNS 刷新仅在 GitHub 临时 Windows runner 上实际执行，不更改持久设置。真实磁盘 TRIM/碎片整理不在自动测试中执行。
 
 这是受控功能预览，不能据 CI 通过就声称 Windows 硬件、OneDrive、目录联接竞态、杀毒和第三方卸载器均安全。日常使用前仍需 Windows 实机/虚拟机试用，维护效果也需结合实际瓶颈判断。
 

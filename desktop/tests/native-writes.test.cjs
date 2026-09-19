@@ -77,7 +77,8 @@ test(
     assert.ok(item, "the unique fixture registration was discovered");
     assert.equal(item.enabled, true, item.reason);
     const result = await service.execute(plan.id, [item.id]);
-    assert.equal(result.results[0].status, "success", JSON.stringify(result));
+    const fixtureError = await fs.readFile(marker + ".error", "utf8").catch(() => "");
+    assert.equal(result.results[0].status, "success", JSON.stringify(result) + fixtureError);
     assert.equal(await fs.readFile(marker, "utf8"), "fixture uninstalled");
     const refreshed = await service.preview();
     assert.equal(
